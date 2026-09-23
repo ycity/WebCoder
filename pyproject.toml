@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-hub = ["fastapi>=0.115", "uvicorn>=0.30", "websockets>=15", "cryptography>=42"]
+hub = ["fastapi>=0.115", "uvicorn>=0.30", "websockets>=15", "cryptography>=42", "httpx>=0.27", "tzdata>=2024.1"]
 agent = ["websockets>=15", "cryptography>=42", "regex>=2024.4"]
 dev = ["pytest>=8", "httpx>=0.27", "mcp>=2.2", "playwright>=1.50", "jsonschema>=4.18", "regex>=2024.4"]
 
@@ -36,3 +36,12 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Ported from CodePier (MIT): its long-line style is kept to ease comparing with upstream.
+"webcoder/hub/collaboration/*" = ["E501"]
+# migrate_chatroom defines its resolver per room and calls it within the same iteration.
+"webcoder/hub/collaboration/schema.py" = ["E501", "B023"]
+# Tests ported from CodePier keep its compact style.
+"tests/test_collaboration_*.py" = ["E501", "E701", "E702", "F841", "B905"]
+"tests/test_mcp_events_*.py" = ["E501", "E701", "E702"]

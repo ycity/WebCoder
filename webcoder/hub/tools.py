@@ -8,7 +8,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from webcoder.common.errors import WebCoderError
 from webcoder.hub import ui
@@ -71,6 +71,7 @@ class ToolResult:
     text: str
     structured: dict | None = None
     meta: dict | None = None
+    status: str | None = None  # set by execute(): the call ran but did not succeed (EXIT_1 ...), as audited
 
 
 @dataclass(frozen=True)
@@ -719,7 +720,8 @@ async def execute(runtime, principal: Principal, tool: Tool, arguments) -> tuple
         except SchemaError as exc:
             raise WebCoderError("INVALID_ARGUMENTS", str(exc)) from None
         result = await tool.handler(ctx, args)
-        return (result if isinstance(result, ToolResult) else ToolResult(result)), False
+        result = result if isinstance(result, ToolResult) else ToolResult(result)
+        return (replace(result, status=ctx.audit_status) if ctx.audit_status else result), False
     except WebCoderError as exc:
         status = exc.code
         return ToolResult(format_error(exc)), True

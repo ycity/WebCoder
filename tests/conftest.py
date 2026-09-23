@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tests.collaboration_support import collab  # noqa: E402,F401 - fixture for the collaboration tests
 from webcoder.agent.__main__ import pair_device  # noqa: E402
 from webcoder.agent.client import run_agent  # noqa: E402
 from webcoder.agent.config import AgentConfig  # noqa: E402
@@ -50,12 +51,12 @@ def posix_shell() -> str:
 
 
 class Hub:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, **settings_overrides):
         import uvicorn
 
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}"
-        settings = Settings(public_url=self.url, data_dir=data_dir)
+        settings = Settings(public_url=self.url, data_dir=data_dir, **settings_overrides)
         self.app = create_app(settings)
         self.runtime = self.app.state.runtime
         self.runtime.auth.create_admin("admin", ADMIN_PASSWORD)

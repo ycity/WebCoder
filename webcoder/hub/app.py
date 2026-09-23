@@ -11,6 +11,8 @@ from fastapi.staticfiles import StaticFiles
 
 from webcoder import VERSION
 from webcoder.hub.auth import ApiError
+from webcoder.hub.collaboration.api import make_router as make_collaboration_router
+from webcoder.hub.collaboration.errors import DevError
 from webcoder.hub.config import Settings
 from webcoder.hub.downloads import make_download_router
 from webcoder.hub.mcp import make_mcp_router
@@ -124,8 +126,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
-        rt.close()
+        await rt.collaboration.loops.start()  # nothing starts while the collaboration switches are off
+        try:
+            yield
+        finally:
+            await rt.collaboration.loops.stop()
+            rt.close()
 
     app = FastAPI(title="WebCoder Hub", version=VERSION, docs_url=None, redoc_url=None, openapi_url=None,
                   lifespan=lifespan)
@@ -134,6 +140,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.exception_handler(ApiError)
     async def api_error(request: Request, exc: ApiError):
         return JSONResponse({"error": {"code": exc.code, "message": exc.message, **exc.extra}},
+                            status_code=exc.status)
+
+    @app.exception_handler(DevError)
+    async def collaboration_error(request: Request, exc: DevError):
+        return JSONResponse({"error": {"code": exc.code, "message": exc.message, **exc.details}},
                             status_code=exc.status)
 
     @app.exception_handler(RequestValidationError)
@@ -159,6 +170,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(make_oauth_router(rt))
     app.include_router(make_mcp_router(rt))
     app.include_router(make_panel_router(rt))
+    app.include_router(make_collaboration_router(rt))
     app.include_router(make_download_router())
 
     @app.websocket("/agent/ws")

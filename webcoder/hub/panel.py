@@ -24,6 +24,7 @@ from webcoder.common.errors import WebCoderError
 from webcoder.hub.agents import CLOSE_FORBIDDEN, CLOSE_UNAUTHORIZED
 from webcoder.hub.auth import SESSION_COOKIE, ApiError
 from webcoder.hub.clients import SUPPORTED_CLIENTS, setup_snippets
+from webcoder.hub.collaboration.schema import purge_owner as purge_collaboration
 from webcoder.hub.install import (
     PLATFORMS,
     install_commands,
@@ -614,6 +615,7 @@ def make_panel_router(rt) -> APIRouter:
             raise ApiError(400, "LAST_ADMIN", "至少要保留一名可用的管理员")
         devices = store.all("SELECT * FROM devices WHERE user_id=?", (user_id,))
         with store.transaction() as db:
+            purge_collaboration(db, user_id)  # rooms, messages, tasks, subscriptions ... of this account
             db.execute("DELETE FROM tokens WHERE grant_id IN (SELECT id FROM grants WHERE user_id=?)", (user_id,))
             db.execute("DELETE FROM grants WHERE user_id=?", (user_id,))
             db.execute("DELETE FROM projects WHERE user_id=?", (user_id,))

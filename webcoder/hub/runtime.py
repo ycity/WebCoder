@@ -53,6 +53,8 @@ class Runtime:
         self.oauth = OAuthService(self)
         self.limiter = RateLimiter()
         self._audit_writes = 0
+        from webcoder.hub.collaboration.lifecycle import install
+        install(self)  # self.collaboration: rooms, dot / Work chats, tasks, MCP Events (off unless switched on)
 
     def audit(self, actor: str, action: str, target: str = "", status: str = "ok", detail=None,
               duration_ms: int | None = None, user_id: str | None = None) -> None:

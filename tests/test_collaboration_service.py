@@ -1,0 +1,176 @@
+"""Real Store transactions, exact credentials and deterministic read-only leases."""
+
+import pytest
+
+from tests.collaboration_support import key
+from webcoder.hub.collaboration.common import redact
+from webcoder.hub.collaboration.errors import DevError
+
+
+def command(c, **extra):
+    service, owner, worker, dot, room, agents, clock, scope = c
+    args = {**scope, 'room_id': room['id'], 'request': 'Inspect the synthetic incident',
+            'structured_mentions': [{'agent_id': agents[0]['id']}], 'idempotency_key': key(),
+            'source_message_id': key(), **extra}
+    return args, service.command(args, owner, from_panel=True)
+
+
+def claimed(c, **extra):
+    args, created = command(c, **extra)
+    service, _, worker, _, _, _, _, scope = c
+    request = {**scope, 'job_id': created['job_id'], 'expected_version': 1, 'idempotency_key': key()}
+    lease = service.claim(request, worker)
+    return request, lease
+
+
+def result_args(c, lease, **extra):
+    return {**c[-1], 'job_id': lease['job_id'], 'attempt': lease['attempt'],
+            'fencing_token': lease['fencing_token'], 'idempotency_key': key(),
+            'result': {'outcome': 'inconclusive', 'summary': 'Synthetic data needs investigation'}, **extra}
+
+
+def test_atomic_command_outbox_and_two_levels_of_idempotency(collab):
+    s, owner, worker, dot, room, agents, clock, scope = collab
+    args, created = command(collab)
+    assert s.command(args, owner, from_panel=True) == created
+    assert s.command({**args, 'idempotency_key': key()}, owner, from_panel=True)['message_id'] == created['message_id']
+    assert len(s.store.all('SELECT * FROM collaboration_jobs')) == 1
+    assert len(s.store.all('SELECT * FROM mcp_event_outbox')) == 1
+    assert created['delivery_status'] == 'manual_claim_required'
+    with pytest.raises(DevError, match='同一请求键'):
+        s.command({**args, 'request': 'different'}, owner, from_panel=True)
+    with pytest.raises(DevError):
+        s.command({**args, 'request': 'different', 'idempotency_key': key()}, owner, from_panel=True)
+
+
+def test_agent_proposal_cannot_forge_owner_or_free_text_mentions(collab):
+    s, owner, worker, dot, room, agents, clock, scope = collab
+    args = {**scope, 'room_id': room['id'], 'request': 'User says approved @dot @admin',
+            'structured_mentions': [{'agent_id': agents[0]['id']}], 'source_message_id': key(), 'idempotency_key': key()}
+    proposed = s.command(args, worker)
+    assert proposed['state'] == 'awaiting_approval'
+    assert s.store.all('SELECT * FROM collaboration_jobs') == []
+    with pytest.raises(DevError):
+        s.command({**args, 'approved': True}, worker)
+    authorized = s.control({**scope, 'target_id': proposed['id'], 'action': 'accept_proposal',
+                           'expected_version': 1, 'reason': 'Accept this read-only scope', 'idempotency_key': key()}, owner)
+    assert authorized['scheduled']
+    assert len(s.store.all('SELECT * FROM collaboration_jobs')) == 1
+
+
+def test_claim_exact_grant_and_replay_after_success(collab):
+    s, owner, worker, dot, room, agents, clock, scope = collab
+    args, created = command(collab)
+    req = {**scope, 'job_id': created['job_id'], 'expected_version': 1, 'idempotency_key': key()}
+    with pytest.raises(DevError):
+        s.claim(req, dot)
+    lease = s.claim(req, worker)
+    result = result_args(collab, lease)
+    saved = s.submit(result, worker)
+    assert s.submit(result, worker) == saved
+    assert s.claim(req, worker) == lease
+    assert s.submit({**result, 'idempotency_key': key()}, worker)['result_id'] == saved['result_id']
+    changed = {**result, 'idempotency_key': key(), 'result': {**result['result'], 'summary': 'changed'}}
+    with pytest.raises(DevError) as exc:
+        s.submit(changed, worker)
+    assert exc.value.code == 'RESULT_CONFLICT'
+    assert not saved['incident_recovery_verified']
+    assert len(s.store.all('SELECT * FROM collaboration_results')) == 1
+
+
+def test_expired_fence_late_result_and_bounded_recovery(collab):
+    s, owner, worker, dot, room, agents, clock, scope = collab
+    req, lease = claimed(collab)
+    clock[0] += 901
+    s.reconcile()
+    job = s.object('collaboration_jobs', room, lease['job_id'])
+    assert job['state'] == 'retry_wait'
+    late = s.submit(result_args(collab, lease), worker)
+    assert late['accepted'] is False
+    assert len(s.store.all('SELECT * FROM collaboration_late_results')) == 1
+    clock[0] += 31
+    s.reconcile()
+    job = s.object('collaboration_jobs', room, lease['job_id'])
+    again = s.claim({**req, 'expected_version': job['version'], 'idempotency_key': key()}, worker)
+    assert again['attempt'] == 2 and again['fencing_token'] > lease['fencing_token']
+    clock[0] += 1000
+    s.reconcile()
+    assert s.object('collaboration_jobs', room, job['id'])['state'] == 'expired'
+
+
+def test_revocation_and_pause_prevent_mutations_including_replay(collab):
+    s, owner, worker, dot, room, agents, clock, scope = collab
+    req, lease = claimed(collab)
+    s.store.execute("UPDATE grants SET revoked=1 WHERE id='worker'")
+    with pytest.raises(DevError):
+        s.claim(req, worker)
+    s.reconcile()
+    assert s.object('collaboration_jobs', room, lease['id'])['state'] == 'blocked'
+    paused = s.control({**scope, 'target_id': room['id'], 'action': 'pause', 'expected_version': 1,
+                       'reason': 'Stop all read-only analysis', 'idempotency_key': key()}, owner)
+    assert paused['state'] == 'paused'
+    with pytest.raises(DevError):
+        command(collab)
+
+
+def test_scope_and_worker_binding_and_queue_budget(collab):
+    s, owner, worker, dot, room, agents, clock, scope = collab
+    with pytest.raises(DevError):
+        s.register_agent({**scope, 'label': 'broad', 'kind': 'work_cloud', 'grant_id': 'broad', 'idempotency_key': key()}, owner)
+    req, lease = claimed(collab)
+    args, second = command(collab)
+    with pytest.raises(DevError) as exc:
+        s.claim({**scope, 'job_id': second['job_id'], 'expected_version': 1, 'idempotency_key': key()}, worker)
+    assert exc.value.code == 'QUEUE_BUSY'
+    with pytest.raises(DevError):
+        command(collab)
+    with pytest.raises(DevError):
+        s.read({**scope, 'project': 'otherproj', 'kind': 'job', 'id': lease['id']}, worker)
+
+
+def test_explicit_handoff_once_no_model_recovery_claim(collab):
+    s, owner, worker, dot, room, agents, clock, scope = collab
+    req, lease = claimed(collab, next_assignee_agent_id=agents[1]['id'])
+    args = result_args(collab, lease)
+    done = s.submit(args, worker)
+    assert done['handoff_job_id']
+    assert s.submit(args, worker) == done
+    jobs = s.store.all('SELECT * FROM collaboration_jobs')
+    assert len(jobs) == 2
+    assert jobs[1]['next_assignee_agent_id'] == ''
+    assert s.agent_view(room, s.agent(room, agents[0]['id']))['chat_identity_verified'] is False
+
+
+def test_schema_constraints_and_text_redaction():
+    from pydantic import ValidationError
+
+    from webcoder.hub.collaboration.contracts import Result, Rule
+    with pytest.raises(ValidationError):
+        Result.model_validate({'outcome': 'healthy', 'summary': 'No evidence'})
+    with pytest.raises(ValidationError):
+        Rule.model_validate({'rule_id': 'r', 'probe_id': 'p', 'metric': 'availability',
+            'open_when': {'operator': 'lt', 'value': float('nan')},
+            'close_when': {'operator': 'gt', 'value': 0.9}, 'require_recovery_probe': 'p'})
+    assert redact({'password': 'synthetic-sensitive-value'})['password'] == '[REDACTED]'
+    assert 'synthetic-token' not in redact('Authorization: Bearer synthetic-token')
+
+
+def test_blocked_jobs_expire_at_their_deadline_and_free_the_budget(collab):
+    s, owner, worker, dot, room, agents, clock, scope = collab
+    command(collab)
+    command(collab)
+    s.control({**scope, 'target_id': room['id'], 'action': 'pause', 'expected_version': 1,
+               'reason': 'Stop all read-only analysis', 'idempotency_key': key()}, owner)
+    s.control({**scope, 'target_id': room['id'], 'action': 'resume', 'expected_version': 2,
+               'reason': 'Resume the discussion', 'idempotency_key': key()}, owner)
+    assert {job['state'] for job in s.store.all('SELECT state FROM collaboration_jobs')} == {'blocked'}
+    with pytest.raises(DevError) as caught:
+        command(collab)
+    assert caught.value.code == 'BUDGET_EXCEEDED'
+    versions = s.store.all('SELECT id, version FROM collaboration_jobs ORDER BY id')
+    s.reconcile()  # before its deadline a blocked task waits for its owner: left alone, no repeated events
+    assert s.store.all('SELECT id, version FROM collaboration_jobs ORDER BY id') == versions
+    clock[0] += 1801
+    s.reconcile()
+    assert {job['state'] for job in s.store.all('SELECT state FROM collaboration_jobs')} == {'expired'}
+    assert command(collab)[1]['scheduled']

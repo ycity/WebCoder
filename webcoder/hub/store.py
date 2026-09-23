@@ -1,10 +1,13 @@
 """SQLite persistence plus a master key for secrets at rest."""
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import functools
 import os
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -83,6 +86,10 @@ def _owner_only(path: Path, mode: int) -> None:
         os.chmod(path, mode)
 
 
+class TransactionAborted(RuntimeError):
+    """A step inside a joined (nested) transaction failed and the caller went on: nothing of it was saved."""
+
+
 class Store:
     """Thread-safe wrapper around one SQLite connection (autocommit + explicit transactions)."""
 
@@ -94,6 +101,10 @@ class Store:
         self.db = sqlite3.connect(self.dir / "hub.db", check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.lock = threading.RLock()
+        self._depth = 0  # open transaction() levels (only the thread holding the lock changes it)
+        self._aborted = False
+        # Database phases of long-running work (collaboration) run here, one at a time, off the event loop.
+        self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="webcoder-store")
         with self.lock:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA busy_timeout=5000")
@@ -103,6 +114,7 @@ class Store:
             self.db.executescript(INDEXES)
             with contextlib.suppress(sqlite3.IntegrityError):  # names differing only in case from before: kept
                 self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_name_nocase ON users(lower(username))")
+            self._migrate_collaboration()
             self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),))
             self.db.execute("PRAGMA foreign_keys=ON")
         self._cipher = AESGCM(self._master_key())
@@ -171,6 +183,19 @@ class Store:
             self.db.execute("ROLLBACK")
             raise
 
+    def _migrate_collaboration(self) -> None:
+        """The collaboration center's tables (additive; created even while the feature is off, so turning it
+        on later needs no separate upgrade step)."""
+        from webcoder.hub.collaboration.schema import migrate
+
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            migrate(self.db)
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+
     def _master_key(self) -> bytes:
         path = self.dir / "master.key"
         if path.exists():
@@ -199,15 +224,41 @@ class Store:
             return self.db.execute(sql, params).rowcount
 
     @contextlib.contextmanager
-    def transaction(self):
+    def transaction(self, *, immediate: bool = True):
+        """BEGIN IMMEDIATE (or a deferred BEGIN for reads) ... COMMIT. Used inside an open transaction it joins
+        it: only the outermost one commits, and a failure in any of them rolls the whole of it back (when the
+        caller carried on regardless, the outermost raises TransactionAborted instead of committing)."""
         with self.lock:
-            self.db.execute("BEGIN IMMEDIATE")
+            if self._depth:
+                self._depth += 1
+                try:
+                    yield self.db
+                except BaseException:
+                    self._aborted = True
+                    raise
+                finally:
+                    self._depth -= 1
+                return
+            self.db.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            self._depth, self._aborted = 1, False
             try:
                 yield self.db
             except BaseException:
+                self._depth = 0
                 self.db.execute("ROLLBACK")
                 raise
+            self._depth = 0
+            if self._aborted:
+                self.db.execute("ROLLBACK")
+                raise TransactionAborted("A step of this change failed, so none of it was saved")
             self.db.execute("COMMIT")
+
+    async def run(self, function, /, *args, **kwargs):
+        """Run one synchronous database phase (reads, a transaction) on the store's worker thread, so the event
+        loop stays free. Phases run one after another; a phase already started finishes even if the awaiting
+        task is cancelled, and no transaction is ever held open across an await."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._worker, functools.partial(function, *args, **kwargs))
 
     def encrypt(self, plaintext: str) -> str:
         nonce = os.urandom(12)
@@ -218,5 +269,6 @@ class Store:
         return self._cipher.decrypt(raw[:12], raw[12:], b"webcoder-hub").decode("utf-8")
 
     def close(self) -> None:
+        self._worker.shutdown(wait=True, cancel_futures=True)
         with self.lock:
             self.db.close()

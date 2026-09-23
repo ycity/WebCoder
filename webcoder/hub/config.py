@@ -13,6 +13,24 @@ def _csv(value: str | None) -> tuple[str, ...]:
     return tuple(item.strip() for item in (value or "").split(",") if item.strip())
 
 
+def _flag(name: str, value: str) -> bool:
+    text = value.strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off", ""):
+        return False
+    raise ValueError(f"{name} must be true or false, not {value!r}")
+
+
+# Collaboration center switches (all off by default): Settings field -> environment variable.
+COLLABORATION_FLAGS = {
+    "collaboration_enabled": "WEBCODER_COLLABORATION_ENABLED",
+    "mcp_events_enabled": "WEBCODER_MCP_EVENTS_ENABLED",
+    "monitor_collector_enabled": "WEBCODER_MONITOR_COLLECTOR_ENABLED",
+    "analysis_dispatch_enabled": "WEBCODER_ANALYSIS_DISPATCH_ENABLED",
+}
+
+
 @dataclass(frozen=True)
 class Settings:
     public_url: str = "http://127.0.0.1:8787"   # the URL clients use; OAuth metadata is derived from it
@@ -25,6 +43,10 @@ class Settings:
     access_token_ttl: int = 3600
     refresh_token_ttl: int = 30 * 86400
     session_ttl: int = 7 * 86400
+    collaboration_enabled: bool = False      # rooms, dot / Work chats, read-only tasks (the master switch)
+    mcp_events_enabled: bool = False         # MCP Events: event catalog, subscriptions and webhook delivery
+    monitor_collector_enabled: bool = False  # owner-approved fixed HTTP GET probes
+    analysis_dispatch_enabled: bool = False  # incidents create analysis tasks; task events are delivered
 
     def __post_init__(self):
         url = self.public_url.strip().rstrip("/")
@@ -37,6 +59,10 @@ class Settings:
         if unknown:
             raise ValueError(f"Unsupported WEBCODER_CLIENTS entries: {', '.join(unknown)} "
                              f"(supported: {', '.join(SUPPORTED_CLIENTS)})")
+        children = [env for field, env in COLLABORATION_FLAGS.items()
+                    if field != "collaboration_enabled" and getattr(self, field)]
+        if children and not self.collaboration_enabled:
+            raise ValueError(f"{', '.join(children)} need WEBCODER_COLLABORATION_ENABLED=true as well")
 
     @property
     def mcp_url(self) -> str:
@@ -64,5 +90,8 @@ class Settings:
             values["agent_timeout"] = float(env["WEBCODER_AGENT_TIMEOUT"])
         if env.get("WEBCODER_MAX_TRANSFER_MB"):
             values["max_transfer_bytes"] = int(float(env["WEBCODER_MAX_TRANSFER_MB"]) * 1024 * 1024)
+        for field, name in COLLABORATION_FLAGS.items():
+            if name in env:
+                values[field] = _flag(name, env[name])
         values.update({key: value for key, value in overrides.items() if value is not None})
         return cls(**values)
