@@ -1,0 +1,28 @@
+# Hub only, plain HTTP. For a public HTTPS deployment add deploy/compose.https.yml:
+#   docker compose -f compose.yml -f deploy/compose.https.yml up -d
+name: webcoder
+services:
+  hub:
+    build: .
+    image: webcoder:0.1.0
+    restart: unless-stopped
+    init: true
+    environment:
+      WEBCODER_PUBLIC_URL: "${WEBCODER_PUBLIC_URL:-http://127.0.0.1:8787}"
+      WEBCODER_CLIENTS: "${WEBCODER_CLIENTS:-chatgpt,codex}"
+      WEBCODER_TRUSTED_PROXIES: "${WEBCODER_TRUSTED_PROXIES:-127.0.0.1}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    ports:
+      - "${WEBCODER_BIND:-127.0.0.1}:8787:8787"
+    volumes:
+      - webcoder-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  webcoder-data:

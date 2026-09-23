@@ -1,0 +1,5 @@
+{$WEBCODER_DOMAIN} {
+	encode gzip
+	# WebSocket upgrades for /agent/ws are proxied automatically.
+	reverse_proxy hub:8787
+}

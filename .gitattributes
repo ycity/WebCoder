@@ -1,0 +1,4 @@
+# Shell scripts and systemd units run on Linux/macOS: keep LF even in Windows checkouts.
+* text=auto eol=lf
+*.png binary
+*.zip binary

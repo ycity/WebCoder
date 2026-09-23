@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments and the local pip cache
+.venv/
+.venv-*/
+venv/
+/pip/
+
+# Test, lint and coverage output
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local data and logs. The hub's default data folder is ./data; wherever a data folder ends up,
+# hub.db (and its backups) and master.key hold every user's accounts.
+/data/
+.localdata/
+hub.db*
+hub-*.db
+*.log
+
+# Secrets (mirrors the agent's DEFAULT_DENY list)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Zips that `python -m webcoder.hub chatgpt-plugin` writes to the current folder by default
+/*.zip
+
+# Editors, IDEs and local Claude Code files
+.idea/
+.vscode/
+*.swp
+*~
+.claude/settings.local.json
+.claude/launch.json
+.claude/worktrees/
+
+# OS clutter
+.DS_Store
+Thumbs.db
+desktop.ini

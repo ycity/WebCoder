@@ -1,0 +1,27 @@
+# Public HTTPS in front of the hub (automatic Let's Encrypt certificates via Caddy).
+# Requires WEBCODER_DOMAIN pointing at this server and ports 80/443 reachable.
+services:
+  hub:
+    ports: !reset []
+    environment:
+      WEBCODER_PUBLIC_URL: "https://${WEBCODER_DOMAIN}"
+      WEBCODER_TRUSTED_PROXIES: "*"   # the hub port is only reachable through Caddy
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - hub
+    environment:
+      WEBCODER_DOMAIN: "${WEBCODER_DOMAIN}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Relative paths resolve against the first compose file (the repo root), not this file.
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,22 @@
+[Unit]
+Description=WebCoder hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=webcoder
+Group=webcoder
+WorkingDirectory=/opt/webcoder/app
+EnvironmentFile=/etc/webcoder/hub.env
+ExecStart=/opt/webcoder/venv/bin/python -m webcoder.hub run
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/webcoder
+MemoryMax=300M
+
+[Install]
+WantedBy=multi-user.target

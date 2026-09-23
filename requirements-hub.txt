@@ -1,0 +1,7 @@
+# Pinned runtime dependencies for the hub (Docker image). Tested with Python 3.11 and 3.13.
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn==0.53.0
+websockets==17.1
+cryptography==50.0.1
+pydantic==2.13.5

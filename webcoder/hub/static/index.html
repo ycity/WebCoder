@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebCoder</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar" id="topbar" hidden>
+    <a class="brand" href="#/overview">Web<span>Agent</span></a>
+    <nav id="nav">
+      <a href="#/overview" data-route="overview">概览</a>
+      <a href="#/devices" data-route="devices">设备</a>
+      <a href="#/projects" data-route="projects">项目</a>
+      <a href="#/tokens" data-route="tokens">访问令牌</a>
+      <a href="#/clients" data-route="clients">接入客户端</a>
+      <a href="#/audit" data-route="audit">审计日志</a>
+      <a href="#/users" data-route="users" hidden>用户</a>
+    </nav>
+    <div class="who"><button id="who" class="ghost small" type="button" title="账号与密码"></button><button id="logout" class="ghost small" type="button">退出</button></div>
+  </header>
+  <main id="app"><p class="muted">加载中…</p></main>
+  <div id="modal" class="modal" hidden><div class="modal-card" id="modal-body"></div></div>
+  <div id="toast" class="toast" hidden></div>
+</body>
+</html>
