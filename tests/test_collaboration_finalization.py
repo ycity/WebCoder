@@ -75,6 +75,8 @@ def test_public_source_profile_contains_collaboration_and_reviewed_docs():
     assert 'Permission is hereby granted, free of charge' in package.__doc__
     for name in ('service.py', 'events.py', 'monitor.py', 'contracts.py', 'joining.py', 'coordination.py'):
         assert (root / name).is_file()
+    static = root.parent / 'static'
+    assert (static / 'collaboration.js').is_file() and (static / 'collaboration.css').is_file()
 
 
 @pytest.mark.anyio

@@ -1,7 +1,9 @@
 "use strict";
 
 const app = document.getElementById("app");
-const state = { session: null, poll: null, view: 0 };  // view: bumped on every render and on logout
+const state = { session: null, poll: null, view: 0,  // view: bumped on every render and on logout
+  leave: null,           // set by a page with more to clean up than a poll (collaboration.js); called on navigation
+  collaboration: null };  // whether the hub has the collaboration center on (null: not asked yet)
 
 // ---------------------------------------------------------------- helpers
 const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -93,13 +95,27 @@ document.addEventListener("click", (event) => {
 const routes = {
   overview: viewOverview, devices: viewDevices, projects: viewProjects, tokens: viewTokens,
   clients: viewClients, audit: viewAudit, consent: viewConsent, users: viewUsers,
+  collaboration: viewCollaboration,
 };
 const publicRoutes = { invite: viewInvite, reset: viewReset };  // reachable without signing in
+// The collaboration page lives in collaboration.js, a later deferred script: all of them have run by DOMContentLoaded.
+const scriptsLoaded = new Promise((resolve) => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
+
+async function viewCollaboration(arg) {
+  if (!window.WebCoderCollaboration) await scriptsLoaded;
+  if (!window.WebCoderCollaboration) throw new Error("协作中心的页面脚本没有加载成功，请刷新页面重试。");
+  await window.WebCoderCollaboration.view(arg);
+}
 
 async function render() {
   state.view += 1;
   clearInterval(state.poll);
   state.poll = null;
+  if (state.leave) {
+    const leave = state.leave;
+    state.leave = null;
+    leave();
+  }
   const [name, arg] = location.hash.replace(/^#\/?/, "").split("/");
   try {
     if (publicRoutes[name]) { showChrome(false); await publicRoutes[name](arg); return; }
@@ -119,6 +135,21 @@ function showChrome(visible, active) {
   if (!visible) return;
   document.getElementById("who").textContent = state.session.username || "";
   document.querySelector('#nav a[data-route="users"]').hidden = state.session.role !== "admin";
+  collaborationNav();
+}
+
+// The collaboration center is opt-in (WEBCODER_COLLABORATION_ENABLED): its link shows only when the hub has it on.
+async function collaborationNav() {
+  const link = document.querySelector('#nav a[data-route="collaboration"]');
+  link.hidden = state.collaboration !== true;
+  if (state.collaboration !== null || collaborationNav.pending) return;
+  collaborationNav.pending = true;
+  try {
+    const response = await fetch("/api/collaboration/status", { credentials: "same-origin" });
+    if (response.ok) state.collaboration = Boolean((await response.json()).features?.enabled);
+  } catch { /* asked again on the next page */ }
+  collaborationNav.pending = false;
+  link.hidden = state.collaboration !== true;
 }
 
 function signedIn(result) {
@@ -446,7 +477,8 @@ async function viewProjects() {
       <td class="wrap"><code>${esc(p.root)}</code></td>
       <td><button class="small" type="button" data-action="mode" data-id="${esc(p.id)}" data-mode="${p.mode}">${p.mode === "rw" ? "读写" : "只读"}</button></td>
       <td>${esc(p.description)}</td>
-      <td><button class="small danger" type="button" data-action="delete" data-id="${esc(p.id)}" data-name="${esc(p.alias)}">删除</button></td></tr>`).join("")}
+      <td>${state.collaboration ? `<a class="table-link" href="#/collaboration/${encodeURIComponent(p.id)}">协作</a>` : ""}
+        <button class="small danger" type="button" data-action="delete" data-id="${esc(p.id)}" data-name="${esc(p.alias)}">删除</button></td></tr>`).join("")}
       </tbody></table></div>` : '<p class="muted">还没有项目。</p>'}</section>`;
   const form = document.getElementById("add-project");
   document.getElementById("browse").addEventListener("click", guard(async () => {

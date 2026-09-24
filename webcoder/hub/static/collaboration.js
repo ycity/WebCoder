@@ -1,0 +1,2030 @@
+"use strict";
+// 协作中心（#/collaboration）：项目讨论室、dot / Work 聊天接入、只读任务、监控诊断和协作目标。
+// 移植自 CodePier 的 web/collaboration.js（https://github.com/cyeinfpro/codepier，MIT 许可，
+// Copyright (c) 2026 Remote Dev MCP Agent contributors），改用 WebCoder 面板的 api / esc / 路由。
+// 只显示共享的项目记录：不含私人聊天、令牌或回调地址。
+// `panel` is app.js's state: session, poll (cleared on navigation), view (bumped on every route render).
+window.WebCoderCollaboration = ((panel) => {
+  const SELECTION_KEY = "webcoder-collaboration-selection";
+  const REQUEST_PREFIX = "webcoder-collaboration-request:";
+  const state = {
+    identity: "", // the signed-in session these caches belong to
+    pageView: -1, // panel.view of the route render that owns the page
+    renderSeq: 0,
+    project: "",
+    conversation: "",
+    environment: "production",
+    view: "discussion",
+    pendingProject: "",
+    projects: [],
+    snapshot: null,
+    grants: [],
+    draft: {},
+    joinDraft: {},
+    expiryTimer: null,
+    viewportCleanup: null,
+    notes: "",
+    error: false,
+    generation: 0,
+    busy: false,
+    busyCleanup: null,
+    polling: false,
+    refreshSequence: 0,
+    requests: new Map(),
+    chats: new Map(),
+    rooms: [],
+    members: [],
+    drawerFocus: null,
+    drawerEpoch: 0,
+    composing: false,
+    reveal: "", // a selector to scroll into view after the next render (a new slot card with its WAJ code)
+  };
+  const labels = {
+    queued: "已排队",
+    leased: "已领取",
+    running: "正在处理",
+    succeeded: "结果已提交",
+    blocked: "等待处理",
+    retry_wait: "等待重试",
+    cancelled: "已取消",
+    expired: "已到期",
+    dead_letter: "投递或重试失败",
+    abandoned: "已放弃投递",
+    failed: "失败",
+    saved: "已保存",
+    submitted: "已提交",
+    active: "已启用",
+    paused: "已暂停",
+    awaiting_approval: "待批准",
+    rejected: "未批准",
+    awaiting_decision: "待验收",
+    verified: "已验收",
+    manual_claim_required: "待人工领取",
+    no_valid_subscription: "没有匹配的有效订阅",
+    event_missing: "派发事件缺失，需要核对",
+    event_queued: "等待投递",
+    event_accepted: "事件已接收，等待领取",
+    awaiting_consumer: "已接收但尚未领取",
+    accepted: "事件已接收",
+    pending: "待投递",
+    unsubscribed: "已退订",
+    revoked: "授权已撤销",
+    open: "异常未恢复",
+    observing: "恢复观察中",
+    resolved: "探针已验证恢复",
+    breaching: "探针持续越界",
+    stale: "采集数据过期",
+    insufficient_data: "样本不足",
+    healthy: "探针当前正常",
+    policy_denied: "探针被策略阻止",
+    collector_disabled: "采集开关未启用",
+    awaiting_samples: "等待新鲜样本",
+    not_started: "尚未启动",
+    disabled: "已关闭",
+    degraded: "链路异常",
+    enabled: "用途绑定有效",
+    disabled_or_expired: "绑定停用或到期",
+    authorization_unavailable: "授权不可用",
+    budget_exhausted: "分析预算已用尽",
+    not_requested: "未创建分析",
+    cooldown: "复发冷却中",
+    action_required: "需要后续处理",
+    inconclusive: "证据不足",
+    explained: "已给出解释",
+    invited: "待在目标聊天加入",
+    registered: "已登记现有连接",
+    code_expired: "加入码已过期",
+    waiting_subscription: "等待宿主订阅",
+    subscription_verified: "订阅回调已验证",
+    test_delivered: "测试已获接收回执",
+    chat_confirmed: "用户已确认聊天收件",
+    room_paused: "协作室已暂停",
+    partial_subscription: "订阅尚未完整",
+    partial_confirmed: "部分订阅已确认收件",
+    slot_revoked: "位置已撤销",
+  };
+  // Mention receipts of one message (what happened to each @): never "read", at most "accepted by the host".
+  const notices = {
+    queued: "等待投递",
+    delivering: "正在投递",
+    accepted: "宿主已接收 · 不代表已读",
+    failed: "投递失败",
+    recipient_unavailable: "位置不可用 · 未提醒",
+    not_subscribed: "未订阅提醒 · 未提醒",
+    notifications_disabled: "事件投递未启用 · 未提醒",
+    suppressed_agent_reply: "助手发言不触发提醒",
+    rate_limited: "提醒过于频繁 · 未提醒",
+  };
+  // An assistant's conclusion, never a probe-verified recovery.
+  const outcomes = { healthy: "助手结论：未发现异常", explained: "已给出解释", action_required: "需要后续处理", blocked: "受阻，未完成",
+    inconclusive: "证据不足" };
+  const componentNames = { collector: "采集器", events: "事件投递器", reconcile: "恢复扫描" };
+  const reasons = {
+    owner_pause: "协作室已暂停", owner_cancel: "房主已取消", agent_disabled: "执行用途已停用", plan_superseded: "监控计划已被新版本取代",
+    result_blocked: "助手报告受阻", analysis_timeout: "领取后未按时提交", deadline_exceeded: "超过任务期限",
+  };
+  // How far a task got: its delivery state only while it is queued (afterwards that is just the state again).
+  const jobProgress = (job) => [job.delivery_status && job.delivery_status !== job.state ? text(job.delivery_status) : "",
+    job.reason_code ? reasons[job.reason_code] || job.reason_code : ""].filter(Boolean).join(" · ");
+  const componentStates = { running: "运行中", stopped: "已停止", not_started: "尚未启动", disabled: "未启用", degraded: "链路异常" };
+  const E = esc;
+  const text = (value) => labels[value] || value || "暂无记录";
+  const when = (value) => (value ? new Date(value * 1000).toLocaleString("zh-CN", { hour12: false }) : "暂无");
+  const scope = () => ({ project: state.project, environment_id: state.environment });
+  const chatScope = () => ({ ...scope(), ...(state.conversation ? { conversation_id: state.conversation } : {}) });
+  const projectLabel = (id) => state.projects.find((p) => p.id === id)?.alias || id;
+  const onPage = () => panel.view === state.pageView && Boolean(panel.session?.authenticated);
+  const sessionIdentity = () => `${panel.session?.username || ""}\n${panel.session?.csrf || ""}`;
+  const roomProjects = () => state.snapshot?.conversation?.projects || [{
+    project_id: state.project, environment_id: state.environment, room_id: state.snapshot?.room?.id,
+    project_label: projectLabel(state.project),
+  }];
+  const grantLabel = (id) => state.grants.find((g) => g.id === id)?.label;
+  const isOwnerMessage = (m) => ["owner", "panel_owner"].includes(m.author_kind) || m.kind === "owner_command";
+
+  function conversationTitle(room) {
+    const first = room?.projects?.[0];
+    if (first && room.title === `${first.project_id} · ${first.environment_id}`) return first.project_label || projectLabel(first.project_id);
+    return room?.title || (first ? first.project_label || projectLabel(first.project_id) : "聊天室");
+  }
+
+  function persistSelection() {
+    try {
+      sessionStorage.setItem(SELECTION_KEY, JSON.stringify({ user: panel.session?.username, project: state.project,
+        environment: state.environment, conversation: state.conversation }));
+    } catch {
+      // Private browsing: the selection simply is not remembered.
+    }
+  }
+
+  function requestId() {
+    if (crypto.randomUUID) return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
+  }
+
+  // SHA-256 for pages served over plain HTTP, where crypto.subtle does not exist.
+  const SHA_K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb,
+    0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f,
+    0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+
+  function sha256Fallback(source) {
+    const data = new TextEncoder().encode(source);
+    const words = new Uint32Array(((data.length + 9 + 63) >> 6) << 4);
+    for (let i = 0; i < data.length; i++) words[i >> 2] |= data[i] << (24 - (i & 3) * 8);
+    words[data.length >> 2] |= 0x80 << (24 - (data.length & 3) * 8);
+    words[words.length - 1] = data.length * 8;
+    const h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    const w = new Uint32Array(64);
+    const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+    for (let offset = 0; offset < words.length; offset += 16) {
+      for (let i = 0; i < 16; i++) w[i] = words[offset + i];
+      for (let i = 16; i < 64; i++) {
+        const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+      }
+      let [a, b, c, d, e, f, g, k] = h;
+      for (let i = 0; i < 64; i++) {
+        const t1 = (k + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + SHA_K[i] + w[i]) | 0;
+        const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+        k = g;
+        g = f;
+        f = e;
+        e = (d + t1) | 0;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) | 0;
+      }
+      [a, b, c, d, e, f, g, k].forEach((value, index) => { h[index] = (h[index] + value) | 0; });
+    }
+    return h.map((value) => (value >>> 0).toString(16).padStart(8, "0")).join("");
+  }
+
+  async function sha256Hex(source) {
+    if (!crypto.subtle) return sha256Fallback(source);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(source));
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  const options = (items, selected, title = "请选择") =>
+    `<option value="">${E(title)}</option>${items.map(([id, label]) => `<option value="${E(id)}" ${id === selected ? "selected" : ""}>${E(label)}</option>`).join("")}`;
+  const agentOptions = (kind, selected, title) => options((state.snapshot?.agents || []).filter((a) => !kind || a.kind === kind)
+    .map((a) => [a.id, `${a.label} · ${a.kind === "dot" ? "dot" : "Work"} · ${a.id.slice(-6)}`]), selected, title);
+  const badge = (value) => `<span class="cc-status">${E(text(value))}</span>`;
+  const empty = (message) => `<p class="cc-empty">${E(message)}</p>`;
+  const button = (action, label, row = {}, extra = "", cls = "") =>
+    `<button type="button" class="${E(cls)}" data-cc-action="${E(action)}" data-id="${E(row.id)}" data-version="${E(row.version)}" ${extra}>${E(label)}</button>`;
+  const field = (label, control) => `<label class="cc-field"><span>${E(label)}</span>${control}</label>`;
+  const json = (value) => `<pre class="cc-json">${E(JSON.stringify(value, null, 2))}</pre>`;
+
+  const coordination = window.WebCoderCollaborationGoals.create({
+    state, E, field, button, empty, getRecord, mutation, showDrawer, closeDrawer, projectLabel, roomProjects, when,
+    onPage, rerender,
+  });
+
+  function projectChips() {
+    const manage = state.snapshot?.can_manage && state.snapshot?.conversation;
+    return `<div class="cc-project-strip" aria-label="房间项目">${roomProjects().map((p) => {
+      const selected = p.project_id === state.project && p.environment_id === state.environment;
+      return `<button type="button" class="cc-project-chip ${selected ? "is-selected" : ""}" data-cc-partition="${E(p.project_id)}"
+        data-environment="${E(p.environment_id)}" aria-pressed="${selected}">${E(p.project_label || projectLabel(p.project_id))}<small>${E(p.environment_id)}</small></button>`;
+    }).join("")}${manage ? button("add-project", "＋ 添加项目", {}, "", "small cc-dashed") : ""}</div>`;
+  }
+
+  function disableComposer() {
+    const area = document.querySelector("#cc-message-input");
+    const send = document.querySelector('#cc-command button[type="submit"]');
+    if (area) area.disabled = true;
+    if (send) send.disabled = true;
+  }
+
+  async function selectPartition(project, environment) {
+    const conversation = state.conversation;
+    rememberChat();
+    disableComposer();
+    chat().mentions = [];
+    chat().reply = "";
+    resetScope();
+    state.project = project;
+    state.environment = environment;
+    persistSelection();
+    await rerender();
+    return state.conversation === conversation && state.project === project && state.environment === environment && onPage();
+  }
+
+  function detach() {
+    rememberChat();
+    state.busyCleanup?.();
+    state.busyCleanup = null;
+    state.refreshSequence += 1;
+    // A re-render keeps the old page while fetching its replacement: that page must not accept actions meanwhile.
+    const root = app.querySelector(".collaboration");
+    if (root) {
+      root.inert = true;
+      root.setAttribute("aria-busy", "true");
+      const dialog = root.querySelector("#cc-drawer"); // a modal dialog escapes ancestor inertness
+      if (dialog) dialog.inert = true;
+    }
+    state.viewportCleanup?.();
+    state.viewportCleanup = null;
+    state.composing = false;
+    state.generation += 1;
+    state.busy = false;
+    state.polling = false;
+    clearTimeout(state.expiryTimer);
+    state.expiryTimer = null;
+    if (state.pageView === panel.view) {
+      clearInterval(panel.poll);
+      panel.poll = null;
+    }
+  }
+
+  function resetScope() {
+    coordination.clear();
+    state.snapshot = null;
+    state.draft = {};
+    state.joinDraft = {};
+    state.notes = "";
+    state.error = false;
+  }
+
+  function clear() {
+    detach();
+    resetScope();
+    state.requests.clear();
+    state.chats.clear();
+    state.rooms = [];
+    state.members = [];
+    state.grants = [];
+    state.projects = [];
+    state.drawerFocus = null;
+    state.conversation = "";
+    state.project = "";
+    state.identity = "";
+    try {
+      sessionStorage.removeItem(SELECTION_KEY);
+      for (const key of Object.keys(sessionStorage)) if (key.startsWith(REQUEST_PREFIX)) sessionStorage.removeItem(key);
+    } catch {
+      // nothing stored
+    }
+  }
+
+  async function getRecord(kind, id, cursor = "", extra = {}) {
+    const query = new URLSearchParams({ ...chatScope(), kind, id, cursor, ...extra });
+    return api(`/api/collaboration?${query}`);
+  }
+
+  async function mutation(operation, args) {
+    const payload = { ...(["message-to-task", "message-access", "read-cursor"].includes(operation) ? chatScope() : scope()), ...args };
+    const fingerprint = JSON.stringify([state.identity, operation, payload]);
+    let id = state.requests.get(fingerprint);
+    if (!id) {
+      id = requestId();
+      state.requests.set(fingerprint, id);
+      if (state.requests.size > 100) state.requests.delete(state.requests.keys().next().value);
+    }
+    return api(`/api/collaboration/${operation}`, { method: "POST",
+      body: operation === "plan-validate" ? payload : { ...payload, idempotency_key: id } });
+  }
+
+  async function commandIdentity(payload) {
+    // Persist only random request IDs, never draft prose or credentials. The digest binds
+    // retries to this login and this exact command across a page reload.
+    const identity = sessionIdentity();
+    const tag = await sha256Hex(JSON.stringify([identity, payload]));
+    if (identity !== sessionIdentity()) throw new Error("登录已改变；未发送旧请求。");
+    const storageKey = REQUEST_PREFIX + tag;
+    let identifier = state.requests.get(storageKey);
+    try {
+      identifier ||= sessionStorage.getItem(storageKey);
+    } catch {
+      // no session storage
+    }
+    if (!identifier || !/^[a-f0-9-]{36}$/.test(identifier)) identifier = requestId();
+    state.requests.set(storageKey, identifier);
+    try {
+      const keys = Object.keys(sessionStorage).filter((key) => key.startsWith(REQUEST_PREFIX));
+      for (const key of keys.slice(0, Math.max(0, keys.length - 99))) sessionStorage.removeItem(key);
+      sessionStorage.setItem(storageKey, identifier);
+    } catch {
+      // no session storage
+    }
+    return { identifier, storageKey };
+  }
+
+  function settle(identity) {
+    try {
+      sessionStorage.removeItem(identity.storageKey);
+    } catch {
+      // no session storage
+    }
+    state.requests.delete(identity.storageKey);
+  }
+
+  // Chat state is memory-only and scoped to this signed-in session and room.
+  // Polling patches only the timeline: it never replaces an active composer.
+  function chat() {
+    const key = JSON.stringify([state.identity, state.conversation || [state.project, state.environment]]);
+    if (!state.chats.has(key)) {
+      state.chats.set(key, { messages: [], after: "", older: "", changes: "", changesReady: false, pending: new Set(), draft: "", mentions: [], reply: "", unread: 0, scroll: null,
+        selection: null, focused: false, initialized: false, read: 0, visibility: "" });
+    }
+    return state.chats.get(key);
+  }
+
+  function rememberChat() {
+    const root = app.querySelector(".collaboration");
+    if (!root || root.dataset.project !== state.project || root.dataset.environment !== state.environment
+        || (root.dataset.conversation || "") !== state.conversation) return; // the page shows another room by now
+    const area = root.querySelector("#cc-command textarea");
+    const feed = root.querySelector(".cc-feed");
+    if (area) {
+      const c = chat();
+      c.draft = area.value;
+      c.selection = [area.selectionStart, area.selectionEnd];
+      c.focused = document.activeElement === area;
+    }
+    if (feed) chat().scroll = feed.scrollTop;
+  }
+
+  const messageText = (m) => m.body_text ?? m.body?.text ?? m.body?.command?.request ?? m.body?.summary ?? "";
+  const eligibleWorkers = () => (state.snapshot?.agents || []).filter((a) => a.binding_status === "enabled");
+  const messageById = (id) => chat().messages.find((m) => m.id === id);
+  const notificationSlots = () => (state.snapshot?.join_slots || []).filter(liveJoin);
+  const jobTitle = (kind) => (kind === "summarize_result" ? "汇总结论" : kind === "propose_monitor_plan" ? "监控计划草稿" : "只读异常分析");
+
+  function mentionMarkup(m, mention) {
+    const slot = (state.snapshot?.join_slots || []).find((s) => s.id === mention.slot_id);
+    const receipt = (m.body?.notifications || []).find((n) => n.slot_id === mention.slot_id);
+    return `<span>@${E(mention.display_snapshot || mention.label || slot?.label || "通知位置")}${receipt
+      ? `<small>${E(notices[receipt.state] || receipt.state)}</small>` : ""}</span>`;
+  }
+
+  function messageMarkup(m) {
+    const body = m.body || {};
+    const owner = isOwnerMessage(m);
+    const author = owner ? "你" : "助手连接";
+    const connectionLabel = owner ? "" : grantLabel(m.author);
+    const root = m.thread_root_id || m.reply_to_id;
+    const job = (state.snapshot?.jobs || []).find((j) => j.id === (m.job_id || body.job_id) || j.context?.origin_message_id === m.id);
+    const resultId = m.result_id || body.result_id;
+    const isResult = ["agent_result", "result_reference"].includes(m.kind) || Boolean(resultId);
+    const mentions = m.mentions || body.mentions || [];
+    const manage = state.snapshot?.can_manage;
+    const source = root && root !== m.id ? button("source", "↗ 查看来源消息", { id: root }, "", "cc-link") : "";
+    const recordKind = job || m.job_id || body.job_id ? "job" : resultId ? "result" : "message";
+    // A task of another project in a multi-project room is not in this partition's records: no guessed state.
+    const taskState = isResult && body.outcome ? `<span class="cc-status">${E(outcomes[body.outcome] || text(body.outcome))}</span>`
+      : job ? badge(job.state) : isResult ? badge(m.state) : '<span class="cc-status">状态见所属项目</span>';
+    const linked = job || isResult || m.job_id || body.job_id ? `<section class="cc-linked-card"><div class="cc-row"><strong>${isResult ? "分析结果" : "只读任务"}</strong>${taskState}</div>
+      <p>${E(isResult ? body.summary || messageText(m) : jobTitle(job?.kind))}</p><small>讨论与任务分别记录 · 结果不代表业务已恢复</small>
+      <div class="cc-actions">${button("result", "查看结果与证据", { id: job?.id || m.job_id || body.job_id || resultId || m.id }, `data-record-kind="${recordKind}"`, "small")}${source}</div></section>` : "";
+    return `<article class="cc-message" data-message-id="${E(m.id)}" data-project="${E(m.project_id || state.project)}" data-environment="${E(m.environment_id || state.environment)}"
+      data-source-room="${E(m.source_room_id || m.room_id)}" data-sequence="${E(m.server_sequence || 0)}"><div class="cc-avatar ${owner ? "is-human" : ""}" aria-hidden="true">${E(author.slice(0, 1))}</div>
+      <div class="cc-message-content"><div class="cc-message-meta"><strong>${E(author)}</strong><small>${owner ? "房主" : `连接记录${connectionLabel ? ` · ${E(connectionLabel)}` : ""} · 身份未验证`}</small>
+        <time>${E(when(m.created || m.created_at))}</time><span class="cc-message-project">${E(projectLabel(m.project_id || state.project))}</span>
+        ${m.state === "awaiting_approval" ? badge("awaiting_approval") : m.state === "rejected" ? badge("rejected") : ""}</div>
+      ${source}${mentions.length ? `<div class="cc-message-mentions">${mentions.map((v) => mentionMarkup(m, v)).join("")}</div>` : ""}
+      <p class="cc-prose">${E(messageText(m))}</p>${linked}
+      <div class="cc-message-actions">${button("reply", "回复", m)}${manage && !isResult && ["text", "reply"].includes(m.kind) ? button("convert", "转为任务", m) : ""}
+        ${button("thread", "查看话题", { id: root || m.id })}${m.state === "awaiting_approval" && manage
+          ? button("accept_proposal", "批准只读任务", m) + button("reject_proposal", "不批准", m) : ""}</div></div></article>`;
+  }
+
+  function draftContext() {
+    const c = chat();
+    const reply = messageById(c.reply);
+    return `${c.reply ? `<div class="cc-reply-preview">回复：${E(reply ? messageText(reply).slice(0, 100) : "已选择的房间消息")}${button("clear-reply", "取消回复", {}, "", "small")}</div>` : ""}${c.mentions
+      .map((id) => {
+        const slot = (state.snapshot?.join_slots || []).find((s) => s.id === id);
+        return `<button type="button" class="cc-mention-chip" data-cc-action="remove-mention" data-id="${E(id)}">@${E(slot?.label || "位置已不可用")} ×</button>`;
+      }).join("")}`;
+  }
+
+  function discussion() {
+    const d = state.snapshot;
+    const c = chat();
+    const enabled = d.capabilities?.plain_messages && d.can_manage && d.room.state === "active";
+    const emptyChat = `<div class="cc-chat-empty"><span class="cc-empty-symbol" aria-hidden="true">↗</span><h3>从一句话开始。</h3>
+      <p>说说你的想法，讨论会留在这个房间。</p><p>需要落实时，创建协作目标，明确结果与参与的助手连接。</p>${d.join_slots?.length
+        ? "<small>已连接通知位置；收件确认不代表助手在线或会自动回复。</small>"
+        : '<button type="button" data-cc-action="open-members">添加 dot 或 Work 连接</button>'}</div>`;
+    return `<section class="cc-conversation"><div class="cc-timeline-wrap"><div class="cc-feed" tabindex="0" aria-label="共享讨论记录">
+      <div class="cc-history">${c.older ? button("older-messages", "加载更早消息", {}, "", "small") : ""}</div>
+      <div class="cc-message-list" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions text">${c.messages.map(messageMarkup).join("") || emptyChat}</div></div>
+      <button type="button" class="cc-new-messages" data-cc-action="latest" ${c.unread ? "" : "hidden"}>${c.unread} 条新消息 ↓</button></div>
+      <div class="cc-compose-wrap"><form id="cc-command" class="cc-composer"><div id="cc-draft-context">${draftContext()}</div>
+        <label class="cc-sr-only" for="cc-message-input">房间消息</label>
+        <textarea id="cc-message-input" name="request" rows="2" maxlength="4000" required ${enabled ? "" : "disabled"}
+          placeholder="${enabled ? "说说你的想法，或 @一个助手连接…" : "普通消息暂不可用，请核对房间与服务能力"}">${E(c.draft)}</textarea>
+        <div class="cc-compose-controls">${button("mentions", "@ 提醒", {}, enabled && d.capabilities?.message_notifications ? "" : "disabled", "small")}${coordination.action()}
+          <small>普通消息 · ${E(projectLabel(state.project))}</small><button class="primary" type="submit" ${enabled ? "" : "disabled"}>发送 ↑</button></div></form>
+        <div class="cc-compose-help"><span>@ 仅通知所选位置，不创建任务或保证回复</span><span class="cc-desktop-key">Enter 发送 · Shift + Enter 换行</span>
+          <span class="cc-mobile-key">Enter 换行</span></div></div></section>`;
+  }
+
+  function memberStrip() {
+    const slots = notificationSlots();
+    return `<div class="cc-member-strip"><span class="cc-avatar is-human" aria-hidden="true">你</span>${slots.slice(0, 3)
+      .map((s) => `<span class="cc-avatar" aria-hidden="true">${s.kind === "dot" ? "●" : "W"}</span>`).join("")}
+      <span>${slots.length ? `你与 ${slots.length} 个通知位置` : "你 · 房间已就绪"}</span><button type="button" class="cc-text-button" data-cc-open-joins>智能体与订阅 ›</button></div>`;
+  }
+
+  function contextContents() {
+    const d = state.snapshot;
+    return `<h2>房间上下文</h2><p class="cc-hint">当前项目：${E(projectLabel(state.project))} · ${E(state.environment)}</p>${coordination.context()}
+      <section><h3>只读任务目标</h3>${(d.goals || []).map((g) => `<div class="cc-goal"><strong>${E(g.request)}</strong><p>${E(g.acceptance)}</p>${g.state === "open" ? '<span class="cc-status">进行中</span>' : badge(g.state)}${d.can_manage && g.state === "awaiting_decision"
+        ? button("verify_goal", "核对证据后验收", g, "", "small") : ""}</div>`).join("") || empty("讨论后再确认目标。普通消息不会自动生成任务。")}</section>
+      <section><h3>房间任务</h3>${(d.jobs || []).slice(0, 8).map((j) => `<button type="button" class="cc-context-job" data-cc-action="result" data-id="${E(j.id)}" data-record-kind="job">
+        <strong>${E(jobTitle(j.kind))}</strong>${badge(j.state)}</button>`).join("") || empty("还没有任务。")}</section>
+      <p class="cc-hint">仅共享房间记录，不同步私人聊天。通知位置与任务用途分别验证；名称不证明独立原生聊天身份。</p>`;
+  }
+
+  function roomRail(selection) {
+    const rooms = state.rooms.length ? state.rooms : state.snapshot?.conversation ? [state.snapshot.conversation] : [];
+    return `<aside class="cc-room-rail"><div class="cc-rail-heading"><strong>协作室</strong>${button("new-conversation", "＋", {}, 'aria-label="创建独立聊天室" title="创建独立聊天室"', "small")}
+      <button class="small cc-room-close" type="button" data-cc-action="close-rooms" aria-label="关闭房间列表">×</button></div>
+      <nav class="cc-room-list" aria-label="房间">${rooms.map((r) => {
+        const first = r.projects?.find((p) => p.project_id === state.project && p.environment_id === state.environment)
+          || r.projects?.[0] || { project_id: r.project_id, environment_id: r.environment_id };
+        return `<button type="button" data-cc-room="${E(r.id)}" data-project="${E(first.project_id)}" data-environment="${E(first.environment_id)}"
+          class="cc-room ${r.id === state.conversation ? "is-current" : ""}"><span class="cc-room-icon" aria-hidden="true">${E((conversationTitle(r) || "C").slice(0, 1))}</span>
+          <span><strong>${E(conversationTitle(r))}</strong><small>${r.projects?.length > 1 ? `${r.projects.length} 个项目` : E(first.environment_id)}</small></span></button>`;
+      }).join("")}</nav><p class="cc-rail-note"><strong>一个房间，共同讨论。</strong><br>项目可中途加入；消息与任务始终保留来源。</p>
+      ${selection ? `<details class="cc-scope-details"><summary>打开项目默认房间</summary>${selection}</details>` : ""}</aside>`;
+  }
+
+  function showDrawer(title, content, trigger) {
+    const dialog = document.querySelector("#cc-drawer");
+    if (!dialog) return;
+    const epoch = ++state.drawerEpoch;
+    const generation = state.generation;
+    if (!dialog.contains(trigger || document.activeElement)) {
+      state.drawerFocus = trigger?.closest(".cc-room-menu")?.querySelector("summary") || trigger || document.activeElement;
+    }
+    dialog.innerHTML = `<header class="cc-drawer-header"><h2>${E(title)}</h2>${button("close-drawer", "关闭", {}, 'aria-label="关闭面板"', "small")}</header>
+      <div class="cc-drawer-body"><p class="cc-feedback cc-drawer-feedback" role="status" aria-live="polite"></p>${content}</div>`;
+    if (!dialog.open) {
+      // Pointer clicks need not focus a button: establish the opener before showModal so closing returns there.
+      const opener = state.drawerFocus;
+      if (opener?.isConnected && !opener.disabled && !opener.closest("[inert]")) opener.focus({ preventScroll: true });
+      dialog.showModal();
+    }
+    bindDetails();
+    const target = dialog.querySelector('input:not([type="checkbox"]), textarea, select, button');
+    const focused = document.activeElement;
+    requestAnimationFrame(() => {
+      // A later input choice, replacement dialog or navigation owns its focus.
+      if (epoch === state.drawerEpoch && generation === state.generation && dialog.isConnected && dialog.open
+          && target?.isConnected && document.activeElement === focused) target.focus();
+    });
+  }
+
+  function closeDrawer() {
+    state.drawerEpoch += 1;
+    const dialog = document.querySelector("#cc-drawer");
+    if (dialog?.open) dialog.close();
+  }
+
+  function patchDraftContext() {
+    const node = document.querySelector("#cc-draft-context");
+    if (node) node.innerHTML = draftContext();
+  }
+
+  function mergeMessages(items) {
+    const c = chat();
+    const map = new Map(c.messages.map((m) => [m.id, m]));
+    for (const m of items) map.set(m.id, m);
+    c.messages = [...map.values()].sort((a, b) => (a.server_sequence || 0) - (b.server_sequence || 0)
+      || (a.created || 0) - (b.created || 0) || a.id.localeCompare(b.id));
+  }
+
+  function patchTimeline(forceBottom = false) {
+    const feed = document.querySelector(".cc-feed");
+    const list = feed?.querySelector(".cc-message-list");
+    if (!list) return;
+    const c = chat();
+    const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 70;
+    const top = feed.scrollTop;
+    const oldIds = new Set([...list.querySelectorAll("[data-message-id]")].map((n) => n.dataset.messageId));
+    if (c.messages.length) list.querySelector(".cc-chat-empty")?.remove();
+    let previous = null;
+    for (const m of c.messages) {
+      let node = [...list.children].find((n) => n.dataset.messageId === m.id);
+      const markup = messageMarkup(m);
+      if (!node || node._ccMarkup !== markup) {
+        const template = document.createElement("template");
+        template.innerHTML = markup.trim();
+        const next = template.content.firstElementChild;
+        next._ccMarkup = markup;
+        if (node) node.replaceWith(next);
+        else list.insertBefore(next, previous ? previous.nextSibling : list.firstChild);
+        node = next;
+      }
+      previous = node;
+    }
+    if (forceBottom || nearBottom) {
+      feed.scrollTop = feed.scrollHeight;
+      c.unread = 0;
+    } else {
+      feed.scrollTop = top;
+      c.unread += c.messages.filter((m) => !oldIds.has(m.id)).length;
+    }
+    c.scroll = feed.scrollTop;
+    const newer = document.querySelector(".cc-new-messages");
+    if (newer) {
+      newer.hidden = !c.unread;
+      newer.textContent = `${c.unread} 条新消息 ↓`;
+    }
+  }
+
+  function markVisibleRead() {
+    const c = chat();
+    const feed = document.querySelector(".cc-feed");
+    if (!state.snapshot?.capabilities?.read_cursors || document.hidden || !feed
+        || feed.scrollHeight - feed.scrollTop - feed.clientHeight >= 70) return;
+    const sequence = Math.max(0, ...c.messages.map((m) => Number(m.server_sequence) || 0));
+    if (sequence <= (c.read || 0)) return;
+    c.read = sequence;
+    mutation("read-cursor", { room_id: state.snapshot.room.id, last_seen_sequence: sequence }).catch(() => { c.read = 0; });
+  }
+
+  function clearVisibility(c, keepDraft = false) {
+    coordination.clear();
+    Object.assign(c, { messages: [], after: "", older: "", changes: "", changesReady: false, pending: new Set(), reply: "", mentions: [], unread: 0, visibility: "" });
+    if (!keepDraft) {
+      c.draft = "";
+      state.joinDraft = {};
+      state.draft = {};
+    }
+    if (state.view !== "discussion") {
+      const main = document.querySelector(".cc-main");
+      if (main) main.innerHTML = empty("访问范围已改变，正在重新核对可见记录。");
+    }
+    closeDrawer();
+    const drawer = document.querySelector("#cc-drawer");
+    if (drawer) drawer.innerHTML = "";
+    const list = document.querySelector(".cc-message-list");
+    if (list) list.innerHTML = empty("访问范围已改变，正在重新核对可见记录。");
+    const context = document.querySelector(".cc-context-rail");
+    if (context) context.innerHTML = "";
+    const area = document.querySelector("#cc-message-input");
+    if (area) {
+      area.value = c.draft;
+      area.disabled = true;
+    }
+    const send = document.querySelector('#cc-command button[type="submit"]');
+    if (send) send.disabled = true;
+    patchDraftContext();
+  }
+
+  function bindDeniedScope(pending = false) {
+    // Replace cleared markup so recovery never reactivates an old listener epoch.
+    state.busyCleanup?.();
+    state.busyCleanup = null;
+    const root = app.querySelector(".collaboration");
+    if (!root) return;
+    const rail = root.querySelector(".cc-room-rail");
+    if (rail) rail.outerHTML = roomRail("");
+    const next = root.cloneNode(true);
+    for (const node of next.querySelectorAll("button")) {
+      const partition = node.dataset.ccPartition;
+      const room = node.dataset.ccRoom;
+      const allowedPartition = partition && roomProjects().some((p) => p.project_id === partition && p.environment_id === node.dataset.environment);
+      const allowedRoom = room && state.rooms.some((r) => r.id === room);
+      const retry = node.dataset.ccAction === "retry-directory" && !pending;
+      node.disabled = !allowedPartition && !allowedRoom && !retry;
+    }
+    root.replaceWith(next);
+    bind();
+    if (pending) next.setAttribute("aria-busy", "true");
+  }
+
+  function showAccessRecovery(items, message, error = false, pending = false) {
+    state.rooms = items;
+    const conversation = items.find((room) => room.id === state.conversation);
+    state.snapshot = {
+      room: state.snapshot?.room, conversation: conversation || { id: state.conversation, projects: [] }, can_manage: false,
+      capabilities: { plain_messages: false, coordination_goals: false }, agents: [], jobs: [], goals: [], join_slots: [],
+      subscriptions: [], messages: [], probes: [], incidents: [], plan: null, components: {},
+    };
+    state.members = [];
+    state.notes = message;
+    state.error = error;
+    const strip = document.querySelector(".cc-project-strip");
+    if (strip) {
+      strip.outerHTML = projectChips();
+      document.querySelector(".cc-project-strip")?.insertAdjacentHTML("beforeend",
+        button("retry-directory", pending ? "正在读取房间目录…" : "重新读取房间目录", {}, "", "small"));
+    }
+    const members = document.querySelector(".cc-member-strip");
+    if (members) members.outerHTML = memberStrip();
+    setFeedback(message, error);
+    bindDeniedScope(pending);
+  }
+
+  async function recoverAccess(allowCurrent = false) {
+    clearVisibility(chat());
+    state.generation += 1;
+    const recovery = state.generation;
+    state.busy = false;
+    const current = () => recovery === state.generation && onPage();
+    if (onPage()) {
+      clearInterval(panel.poll);
+      panel.poll = null;
+    }
+    showAccessRecovery([], "项目访问范围已改变，旧记录已清除。正在读取最新房间目录…", false, true);
+    try {
+      const directory = await api("/api/collaboration/conversations");
+      if (!current()) return;
+      const available = (directory.items || []).find((room) => room.id === state.conversation);
+      if (allowCurrent && available?.projects?.some((p) => p.project_id === state.project && p.environment_id === state.environment)) {
+        state.rooms = directory.items || [];
+        state.notes = "访问范围已更新。";
+        await rerender();
+        return;
+      }
+      showAccessRecovery(directory.items || [], "项目访问范围已改变，旧记录已清除。请重新选择仍有权限的项目。");
+    } catch (error) {
+      if (error.stale || !current()) return;
+      showAccessRecovery([], `旧记录已清除。房间目录读取失败：${error.message}。可重试或从项目重新进入。`, true);
+    }
+  }
+
+  // A message can change without any new message (a proposal approved or rejected elsewhere, a mention receipt), and
+  // then the timeline's "after" read never returns it again. The room's change feed names such messages; their ids stay
+  // pending until their current state has been read and merged, so a failed or deferred read is retried next poll.
+  const receiptsWaiting = (m) => (m.body?.notifications || []).some((n) => ["queued", "delivering"].includes(n.state));
+  const unsettled = (m) => m.state === "awaiting_approval" || receiptsWaiting(m);
+
+  async function readChangeFeed(room, c) {
+    const changed = [];
+    for (let page = 0; page < 20; page += 1) {
+      const feed = await getRecord("changes", "", c.changes || "", { room_id: room, limit: "100" });
+      for (const item of feed.items || []) if (["message", "message_delivery"].includes(item.kind)) changed.push(item.object_id);
+      c.changes = feed.next_cursor || c.changes;
+      if (!feed.has_more) break;
+    }
+    return changed;
+  }
+
+  // Take the feed's position before a timeline snapshot is read: whatever changes afterwards reaches the next poll
+  // (a change in between is in the snapshot already, at worst read once more).
+  async function startChangeFeed(room) {
+    const c = chat();
+    try {
+      await readChangeFeed(room, c);
+      c.changesReady = true;
+    } catch (error) {
+      if (!error.stale) Object.assign(c, { changes: "", changesReady: false });
+    }
+  }
+
+  async function changedMessages(room) {
+    const c = chat();
+    if (!c.changesReady) {
+      // No position (or it was lost, e.g. when the room's projects changed): take one, and re-read every shown
+      // message that may still have changed since.
+      await startChangeFeed(room);
+      for (const m of c.messages) if (unsettled(m)) c.pending.add(m.id);
+    } else {
+      try {
+        for (const id of await readChangeFeed(room, c)) c.pending.add(id);
+      } catch (error) {
+        if (error.stale) return [];
+        Object.assign(c, { changes: "", changesReady: false });
+      }
+    }
+    for (const m of c.messages) if (receiptsWaiting(m)) c.pending.add(m.id);  // some receipt states leave no change
+    const shown = new Map(c.messages.map((m) => [m.id, m]));
+    for (const id of [...c.pending]) if (!shown.has(id)) c.pending.delete(id);  // loaded later, it comes current
+    const batch = [...c.pending].slice(0, 20).map((id) => shown.get(id));
+    const read = (await Promise.all(batch.map((m) => getRecord("message_status", m.id, "", {
+      ...(m.project_id ? { project: m.project_id, environment_id: m.environment_id } : {}),
+      room_id: m.source_room_id || m.room_id,
+    }).then((record) => record.message, () => null)))).filter(Boolean);
+    return read;  // still pending: the caller drops them once merged (a poll gone stale merges nothing)
+  }
+
+  async function refreshChat(forceBottom = false) {
+    if (!state.snapshot?.room || !state.snapshot.capabilities?.plain_messages) return;
+    const gen = state.generation;
+    const sequence = ++state.refreshSequence;
+    const c = chat();
+    const room = state.snapshot.room.id;
+    const current = () => sequence === state.refreshSequence && gen === state.generation && onPage() && c === chat();
+    let timeline;
+    let overview;
+    try {
+      [timeline, overview] = await Promise.all([
+        getRecord("timeline", "", "", { room_id: room, after: c.after, limit: "100" }),
+        getRecord("overview", ""),
+      ]);
+      if (!current()) return;
+      // A known projection change clears private records before unrelated reads.
+      if (c.visibility && c.visibility !== timeline.visibility_token) {
+        const allowed = overview.conversation?.projects?.some((p) => p.project_id === state.project && p.environment_id === state.environment);
+        clearVisibility(c, Boolean(allowed));
+        await rerender();
+        return;
+      }
+      await coordination.load(overview, current);
+    } catch (error) {
+      if (error.stale || !current()) return;
+      if (["INVALID_CURSOR", "FORBIDDEN", "PERMISSION_DENIED", "AUTHORIZATION_CHANGED", "ACCESS_CHANGED", "PROJECT_NOT_FOUND",
+        "CONVERSATION_NOT_FOUND", "CONVERSATION_PROJECT_MISMATCH"].includes(error.code) || [400, 403, 409].includes(error.status)) {
+        await recoverAccess(error.status !== 403);
+        return;
+      }
+      throw error;
+    }
+    if (!current()) return;
+    c.visibility = timeline.visibility_token;
+    // This poll's new messages first: shown, a change that reached them meanwhile is re-read below as well.
+    mergeMessages(timeline.items || []);
+    c.after = timeline.after_cursor || c.after;
+    const updated = await changedMessages(room);
+    if (!current()) return;
+    mergeMessages(updated);
+    for (const m of updated) c.pending.delete(m.id);  // merged now; until then they stay pending for the next poll
+    state.snapshot = overview;
+    patchTimeline(forceBottom);
+    const goals = document.querySelector(".cc-coordination-list");
+    if (goals && !goals.contains(document.activeElement)) goals.outerHTML = coordination.list();
+    markVisibleRead();
+    const context = document.querySelector(".cc-context-rail");
+    if (context && !context.contains(document.activeElement)) context.innerHTML = contextContents();
+    const strip = document.querySelector(".cc-member-strip");
+    if (strip && !strip.contains(document.activeElement)) strip.outerHTML = memberStrip();
+    const projects = document.querySelector(".cc-project-strip");
+    if (projects && !projects.contains(document.activeElement)) projects.outerHTML = projectChips();
+    const area = document.querySelector("#cc-message-input");
+    if (area) {
+      area.disabled = !overview.can_manage || overview.room.state !== "active" || !overview.capabilities?.plain_messages;
+      document.querySelector('#cc-command button[type="submit"]').disabled = area.disabled;
+    }
+  }
+
+  function jobs() {
+    const d = state.snapshot;
+    return `<section class="cc-stack">${coordination.list()}<details class="cc-legacy-tasks" open><summary>只读任务记录</summary>
+      ${d.jobs.map((job) => `<article class="cc-card"><div class="cc-row"><strong>${E(jobTitle(job.kind))}</strong>${badge(job.state)}</div>
+        ${jobProgress(job) ? `<p>${E(jobProgress(job))}</p>` : ""}
+        <dl class="cc-facts"><div><dt>任务</dt><dd>${E(job.id.slice(-8))}</dd></div><div><dt>领取轮次</dt><dd>${E(job.attempt)} / 3</dd></div>
+          <div><dt>期限</dt><dd>${E(when(job.deadline_at))}</dd></div></dl>
+        <details data-cc-detail="job" data-id="${E(job.id)}"><summary>上下文、结果与执行记录</summary><div class="cc-detail">展开后读取当前记录</div></details>
+        ${d.can_manage && !["succeeded", "failed", "cancelled", "expired", "dead_letter"].includes(job.state)
+          ? `<div class="cc-actions">${["blocked", "retry_wait"].includes(job.state) ? button("retry", "在原期限内解除阻塞", job) : ""}${button("cancel", "取消只读任务", job, "", "danger")}</div>` : ""}</article>`).join("")
+        || empty("尚未创建任务。任务是否完成与业务是否恢复会分别显示。")}
+      ${d.jobs_next_cursor ? button("more", "加载更多任务", {}, 'data-kind="jobs"') : ""}</details></section>`;
+  }
+
+  function components() {
+    const entries = Object.entries(state.snapshot?.components || {});
+    if (!entries.length) return "";
+    return `<article class="cc-card"><h2>链路状态</h2>${entries.map(([name, value]) => `<div class="cc-row cc-rule"><span>${E(componentNames[name] || name)}</span>
+      <span class="cc-status">${E(componentStates[value?.status] || text(value?.status))}</span></div>`).join("")}
+      <p class="cc-hint">运行中只表示 Hub 上的确定性服务在运行，不表示助手在线。</p></article>`;
+  }
+
+  function monitoring() {
+    const d = state.snapshot;
+    const plan = d.plan;
+    const probes = (d.probes || []).map((probe) => [probe.id, `${probe.label} · ${probe.id.slice(-6)}`]);
+    const latest = plan?.latest;
+    const current = plan && latest ? `<article class="cc-card"><div class="cc-row"><h2>监控计划</h2>${badge(plan.status || plan.state)}</div>
+      <p>生效版本 ${E(plan.active_version || "无")} · 最新草稿 ${E(plan.latest_version)} · 最近采集 ${E(when(plan.last_collected))}${plan.state === "awaiting_approval" ? " · 等待批准" : ""}</p>
+      ${(plan.rules || []).map((rule) => `<div class="cc-row cc-rule"><span>${E(rule.rule_id)}</span>${badge(rule.status)}<small>异常确认 ${E(rule.opening)} · 恢复确认 ${E(rule.closing)}</small></div>`).join("")}
+      <details><summary>审阅最新计划与固定目标</summary>${json(latest.config)}<div class="cc-targets">${(d.probes || [])
+        .filter((probe) => (latest.config.rules || []).some((rule) => rule.probe_id === probe.id || rule.require_recovery_probe === probe.id))
+        .map((probe) => `<p><strong>${E(probe.label)}</strong><br>${E(probe.target?.url || "固定目标仅向管理者显示")}</p>`).join("")}</div></details>
+      ${d.can_manage && (plan.state !== "active" || plan.active_version !== latest.version) ? `<div class="cc-approval"><label><input id="cc-approval" type="checkbox" data-digest="${E(latest.digest)}">
+        已审阅此版本的固定 GET 目标、阈值、期限和只读分析范围</label>${button("activate-plan", "批准并激活此版本", { id: plan.id, version: plan.version },
+          `data-plan-version="${E(latest.version)}" data-digest="${E(latest.digest)}"`, "primary")}
+        ${d.features && !d.features.collector_enabled ? '<p class="cc-hint">采集开关（WEBCODER_MONITOR_COLLECTOR_ENABLED）未启用：激活后也不会采集，计划会显示“采集开关未启用”。</p>' : ""}</div>` : ""}
+      ${d.can_manage && plan.state === "active" ? `<div class="cc-actions">${button("plan_pause", "暂停此计划", plan)}</div>` : ""}</article>`
+      : empty("尚无计划。先登记固定探针，再保存草稿；批准前不会采集。");
+    const incidents = (d.incidents || []).map((incident) => `<article class="cc-card"><div class="cc-row"><strong>${E(incident.rule_id)} · 第 ${E(incident.episode)} 次发生</strong>${badge(incident.state)}</div>
+      <p>${E(incident.severity)} · ${E(text(incident.analysis_state))}${incident.suppressed ? " · 维护期仅抑制通知" : ""}</p>
+      <small>最近证据 ${E(when(incident.updated))} · 计划 v${E(incident.plan_version)}</small>
+      ${incident.evidence_id ? `<details data-cc-detail="evidence" data-project-diagnostic="true" data-id="${E(incident.evidence_id)}"><summary>查看脱敏探针证据</summary>
+        <div class="cc-detail">展开后读取当前授权证据</div></details>` : ""}</article>`).join("");
+    const manage = d.can_manage ? `<details class="cc-card"><summary>登记固定只读探针</summary><form id="cc-probe" class="cc-form">
+        ${field("名称", '<input name="label" maxlength="80" required>')}
+        ${field("固定 GET 地址", '<input name="url" type="url" maxlength="2048" placeholder="https://service.example/ready" required>')}
+        <details><summary>受限内部服务配置</summary>${field("允许的私网 CIDR，每行一个", '<textarea name="networks" rows="2" placeholder="仅填写明确允许此探针访问的网段"></textarea>')}
+          <label><input name="allow_http" type="checkbox"> 此固定内部目标允许明文 HTTP</label></details>
+        <label><input type="checkbox" name="confirm" required> 确认该 GET 不修改业务数据，地址不含凭据或客户内容</label>
+        <div><button type="submit">登记探针，不启动采集</button></div></form></details>
+      <details class="cc-card" data-cc-keep="plan-draft"><summary>新建或修订监控草稿</summary><form id="cc-plan" class="cc-form">
+        <div class="cc-two">${field("入口探针", `<select name="probe">${options(probes, state.draft.probe)}</select>`)}
+          ${field("独立恢复探针", `<select name="recovery">${options(probes, state.draft.recovery, "使用同一个固定探针")}</select>`)}</div>
+        ${field("异常分析对象", `<select name="monitor_assignee">${agentOptions("work_cloud", state.draft.monitor_assignee, "不自动创建分析任务")}</select>`)}
+        <div>${button("plan-template", "生成可审阅的初始配置")}</div>
+        ${field("计划 JSON", `<textarea name="plan_json" rows="12" spellcheck="false" required placeholder="先生成配置，或粘贴需要审阅的声明式计划。">${E(state.draft.plan_json)}</textarea>`)}
+        <small>初始配置只代表合成探针，不是全部用户请求的成功率。可以调整后先校验，再保存版本。</small>
+        <div class="cc-actions">${button("validate-plan", "只校验")}<button type="submit">保存新草稿，不激活</button></div></form></details>` : "";
+    return `<section class="cc-stack"><p class="cc-hint">当前项目监控诊断：${E(projectLabel(state.project))} · ${E(state.environment)}。此处查看项目级监控，不扩展房间共享范围。
+      探针从 Hub 所在服务器发起 GET 请求。</p>${current}${incidents || empty("暂无已确认异常；这不等于全部业务均健康。")}
+      ${d.incidents_next_cursor ? button("more", "加载更多异常", {}, 'data-kind="incidents"') : ""}${manage}${components()}</section>`;
+  }
+
+  const joinStatus = (slot) => {
+    if (slot.state !== "revoked" && slot.expires_at * 1000 <= Date.now()) return "expired";
+    if (!["revoked", "expired"].includes(slot.state) && state.snapshot?.room?.state === "paused") return "room_paused";
+    return slot.state === "invited" && slot.code_expires_at * 1000 <= Date.now() ? "code_expired" : slot.status;
+  };
+  const liveJoin = (slot) => !["revoked", "expired"].includes(slot.state) && slot.expires_at * 1000 > Date.now();
+  const joinInstruction = (slot) => {
+    if (!liveJoin(slot) || state.snapshot?.room?.state !== "active") return "";
+    if (slot.state === "registered") return slot.subscription_instruction || "";
+    if (joinStatus(slot) !== "invited" || !slot.join_instruction) return "";
+    return slot.join_instruction
+      + (slot.kind === "work_cloud"
+        ? " 请使用 ChatGPT 网页的 Work 聊天，或桌面端已选择 Cloud 的 Work 聊天；本地和 SSH Codex 会话不能创建原生事件订阅。"
+        : " 请发送到支持 MCP Events 的原 dot 聊天。")
+      + " 请仅使用当前聊天已有的 WebCoder 授权；允许创建上述原生事件订阅，不新建 WebCoder 凭据或扩大权限。"
+      + " 请先查找宿主的订阅能力，使用实际事件来源标识；回调与签名材料由宿主提供，并完成原生确认。无法订阅时报告具体缺失能力或实际调用错误。"
+      + " 通知为项目共享，加入不授权领取或执行任务，也不证明聊天身份。";
+  };
+  const eventName = (name) => String(name || "").replace("webcoder.", "");
+
+  function joinCard(slot) {
+    const d = state.snapshot;
+    const status = joinStatus(slot);
+    const live = liveJoin(slot);
+    const ready = live && d.room.state === "active";
+    const instruction = joinInstruction(slot);
+    const routes = slot.routes || [];
+    const available = routes.filter((route) => route.available);
+    const confirmations = slot.confirmation_event_ids || [];
+    const canConfirm = ready && confirmations.length > 0 && available.some((route) => !route.chat_receipt_confirmed);
+    const hints = {
+      invited: "下一步：复制完整指令，发送到这个位置对应的真实 dot / Work 聊天。",
+      code_expired: "加入码已失效。刷新后复制新指令；旧码不能加入。",
+      waiting_subscription: "现有连接已登记。复制下方继续订阅指令，发到原 dot 或 Work Cloud 聊天。插件页已显示事件但仍无法订阅时，请让聊天重新读取可订阅事件源并核对实际连接器标识。",
+      subscription_verified: "宿主回调验证通过。发送测试，再到目标聊天逐个核对事件编号。",
+      partial_subscription: "仅部分必需事件已订阅。请在原聊天完成缺少的订阅；可先测试现有订阅。",
+      partial_confirmed: "你已确认现有订阅的收件，但仍缺少必需事件。这个聊天位置尚未完整接通。",
+      test_delivered: "已有测试获得 HTTP 接收回执。请在目标聊天核对下方全部事件；回执不代表聊天已收到或用户已读。",
+      chat_confirmed: "你已确认在目标聊天看到当前测试事件。这是人工收件确认，聊天身份仍未做密码学验证。",
+      authorization_unavailable: "原连接授权不可用（令牌或 OAuth 授权已撤销、到期或失去项目权限）。请核对原授权；新聊天应创建独立位置。",
+      room_paused: "协作室暂停期间不接受加入或测试。恢复后刷新当前状态。",
+      revoked: "这个位置已撤销，关联订阅已停止。需要时创建新的聊天位置。",
+      expired: "这个位置已到期。需要继续接收时，请创建新位置并重新验证。",
+    };
+    const invitation = instruction ? `<div class="cc-join-invitation">${slot.state === "invited"
+      ? `<div class="cc-row"><strong class="cc-join-code">${E(slot.join_code)}</strong><small>加入码有效至 ${E(when(slot.code_expires_at))}</small></div>` : ""}
+      ${field(slot.state === "registered" ? "发到原聊天的继续订阅指令" : "发到对应聊天的完整加入指令",
+        `<textarea class="cc-join-instruction" rows="5" readonly spellcheck="false">${E(instruction)}</textarea>`)}
+      <div class="cc-actions">${button("join-copy", slot.state === "registered" ? "复制继续订阅指令" : "复制加入指令", slot, "", "primary")}${button("join-select", "选择指令文本", slot)}</div></div>` : "";
+    const coverage = slot.state === "registered" ? `<p class="cc-join-coverage">有效订阅 ${E(slot.subscription_count ?? available.length)} / ${E(slot.expected_subscription_count ?? (slot.kind === "dot" ? 4 : 2))}
+      ${slot.connection_complete ? " · 必需订阅与人工收件确认齐全" : " · 连接验证尚未完成"}</p>${(slot.missing_events || []).length
+        ? `<p class="cc-hint">缺少事件：${slot.missing_events.map((name) => E(eventName(name))).join("、")}</p>` : ""}` : "";
+    const routeList = routes.length ? `<ul class="cc-join-routes" aria-label="订阅与测试证据">${routes.map((route) => `<li><div class="cc-row"><strong>${E(eventName(route.name))}</strong>
+      ${badge(route.available ? route.state : "no_valid_subscription")}</div><small>订阅 ${E(route.id.slice(-8))} · 到期 ${E(when(route.expires_at))}</small>
+      ${route.test ? `<p>测试事件：<span class="cc-event-id">${E(route.test.event_id)}</span></p><p class="cc-hint">${E(text(route.test.state))}${route.chat_receipt_confirmed
+        ? " · 用户已核对这个事件" : " · 尚未确认目标聊天收件"}</p>` : '<p class="cc-hint">尚未发送测试事件</p>'}</li>`).join("")}</ul>` : "";
+    const confirm = canConfirm && d.can_manage ? `<form class="cc-join-confirm cc-approval" data-slot-id="${E(slot.id)}" data-version="${E(slot.version)}" data-events="${E(JSON.stringify(confirmations))}">
+      <label><input name="confirmed_received" type="checkbox" required> 我已在此位置对应的真实聊天中逐个看到并核对上方全部当前测试事件。</label>
+      <div><button type="submit">确认目标聊天已收到</button></div></form>` : "";
+    const controls = d.can_manage && live ? `<div class="cc-actions">${slot.state === "invited" && ready ? button("join-refresh_code", "刷新加入码", slot) : ""}
+      ${slot.state === "registered" && ready && available.length ? button("join-test", "发送无敏感测试事件", slot) : ""}
+      ${button("join-revoke", "撤销位置并停止关联订阅", slot, "", "danger")}</div>` : "";
+    return `<article class="cc-card cc-join-card" data-cc-slot="${E(slot.id)}"><div class="cc-row"><h3>${E(slot.label)}</h3>${badge(status === "revoked" ? "slot_revoked" : status)}</div>
+      <p class="cc-hint">${E(slot.kind === "dot" ? "dot · 通知位置" : "Work · 通知位置")} · 位置 ${E(slot.id.slice(-8))}</p>
+      <p class="cc-join-hint">${E(hints[status] || "请刷新并核对当前状态。")}</p>${invitation}
+      <small>位置有效至 ${E(when(slot.expires_at))} · 项目共享通知 · 无任务领取权限</small>${coverage}${routeList}${confirm}${controls}</article>`;
+  }
+
+  function memberAccessCard(slot) {
+    const member = state.members.find((m) => m.slot_id === slot.id || m.join_slot_id === slot.id || m.member_ref === slot.id || m.id === slot.id);
+    if (!member || !liveJoin(slot) || slot.state !== "registered") return "";
+    const subscription = member.message_subscription_request;
+    const instruction = subscription ? `@WebCoder 请使用当前已有连接，为这个通知位置订阅房间消息提醒事件 ${subscription.name}，参数：${JSON.stringify(subscription.arguments)}。`
+      + "允许创建这一项原生事件订阅，仍需完成宿主确认；不要更改凭据或扩大 WebCoder 授权。此订阅只用于明确 @ 提醒，不创建任务，也不保证自动回复。" : "";
+    const notificationState = { active: "已有有效订阅", not_subscribed: "尚未订阅" }[member.message_notification_state] || member.message_notification_state || "尚未订阅";
+    return `<section class="cc-card cc-speaking" data-speaking-slot="${E(slot.id)}"><h3>房间讨论能力 · ${E(slot.label)}</h3>
+      <p>${member.can_speak ? "这个连接已获准在本房间发言" : "这个连接尚未获准在本房间发言"}</p>
+      <p class="cc-hint">同一授权下的多个聊天共享这项许可。标签不证明独立聊天身份；通知订阅、房间发言和任务资格分别管理。</p>
+      ${member.speaking_expires_at && member.can_speak ? `<small>发言许可到期：${E(when(member.speaking_expires_at))}</small>` : ""}
+      ${state.snapshot.can_manage && member.grant_id ? `<div class="cc-actions">${button("message-access", member.can_speak ? "撤回这个连接的发言许可" : "审阅并允许这个连接发言",
+        { id: member.grant_id }, `data-enabled="${!member.can_speak}" data-speaking-version="${E(member.speaking_version || 0)}"`)}</div>` : ""}
+      ${instruction ? `<details><summary>独立订阅 @ 提醒</summary><p class="cc-hint">已有 WAJ 通知不会自动增加此事件。将以下指令发到对应的原聊天，完成新的宿主确认。</p>
+        <label class="cc-field"><span>@ 提醒订阅指令</span><textarea class="cc-mention-instruction" readonly rows="5">${E(instruction)}</textarea></label>
+        ${button("mention-copy", "复制 @ 提醒订阅指令")}<p>当前提醒订阅：${E(notificationState)}</p></details>` : ""}</section>`;
+  }
+
+  function joining() {
+    const d = state.snapshot;
+    const slots = d.join_slots || [];
+    const form = d.can_manage && d.room.state === "active" ? `<form id="cc-join-slot" class="cc-form"><div class="cc-two">
+        ${field("聊天位置名称", `<input name="label" maxlength="80" value="${E(state.joinDraft.label)}" placeholder="例如：项目协调 dot" autocomplete="off" required>`)}
+        ${field("聊天类型", `<select name="kind"><option value="dot"${state.joinDraft.kind !== "work_cloud" ? " selected" : ""}>dot · 通知位置</option>
+          <option value="work_cloud"${state.joinDraft.kind === "work_cloud" ? " selected" : ""}>Work · 通知位置</option></select>`)}</div>
+        <div class="cc-row"><small>每个真实聊天单独创建一个位置。位置有效 7 天，加入码有效 30 分钟。</small>
+        <button class="primary" type="submit">创建聊天位置并获取加入码</button></div></form>`
+      : empty(d.can_manage ? "请先恢复协作室，再添加聊天。" : "仅项目所有者可以添加聊天位置。");
+    return `<section class="cc-join cc-stack" aria-labelledby="cc-join-title"><section class="cc-card cc-join-intro">
+      <span class="cc-eyebrow">加入项目协作</span><h2 id="cc-join-title">把 dot 和 Work 聊天接入讨论室</h2>
+      <ol class="cc-join-steps"><li><strong>1. 选择用途与位置</strong><span>为每个目标聊天独立登记</span></li>
+        <li><strong>2. 复制加入指令</strong><span>使用当前已有的 WebCoder 授权</span></li>
+        <li><strong>3. 回到原聊天完成订阅</strong><span>中断后可复制继续订阅指令</span></li>
+        <li><strong>4. 测试并核对收件</strong><span>宿主确认 → 测试 → 核对事件</span></li></ol>${form}
+      <p class="cc-hint">加入码（WAJ-…）只定位讨论室，使用已有项目授权，不创建凭据或扩大权限。项目通知共享；@位置不是任务指派，也不能证明原始聊天身份。</p></section>
+      ${slots.map((slot) => joinCard(slot) + memberAccessCard(slot)).join("")}
+      <details class="cc-card"><summary>聊天中看不到新的工具或事件？</summary><p class="cc-hint">如果插件页仍显示旧工具或事件，可在 ChatGPT 的应用设置里刷新（重新扫描）MCP，
+        再回到原聊天继续。无需更换现有授权。事件订阅需要 Hub 启用 WEBCODER_MCP_EVENTS_ENABLED。</p>
+        <a href="https://developers.openai.com/plugins/build/mcp-events#test-in-chatgpt" target="_blank" rel="noopener noreferrer">查看官方事件测试说明</a></details></section>`;
+  }
+
+  function expireInvitations(root) {
+    clearTimeout(state.expiryTimer);
+    const invited = (state.snapshot?.join_slots || []).filter((slot) => slot.state === "invited" && slot.join_instruction);
+    let next = Infinity;
+    for (const slot of invited) {
+      const remaining = Math.min(slot.code_expires_at, slot.expires_at) * 1000 - Date.now();
+      if (remaining <= 0) {
+        const card = Array.from(root.querySelectorAll("[data-cc-slot]")).find((node) => node.dataset.ccSlot === slot.id);
+        if (card?.querySelector(".cc-join-invitation")) {
+          card.querySelector(".cc-join-invitation").remove();
+          card.querySelector(".cc-status").textContent = "加入码已过期";
+          card.querySelector(".cc-join-hint").textContent = "加入码已失效。刷新后复制新指令；旧码不能加入。";
+        }
+      } else {
+        next = Math.min(next, remaining);
+      }
+    }
+    if (Number.isFinite(next)) {
+      const generation = state.generation;
+      state.expiryTimer = setTimeout(() => {
+        if (generation === state.generation && root.isConnected) expireInvitations(root);
+      }, Math.max(1, Math.min(next + 10, 2147483647)));
+    }
+  }
+
+  function agents() {
+    const d = state.snapshot;
+    // A read-only connection: its scopes map to exactly the collaboration capability "read".
+    const available = state.grants.filter((grant) => !grant.revoked && Array.isArray(grant.scopes) && grant.scopes.includes("read")
+      && grant.scopes.every((value) => value === "read"))
+      .map((grant) => [grant.id || grant.grant_id, `${grant.label || "只读连接"} · ${grant.kind === "oauth" ? "OAuth" : "令牌"} · ${(grant.id || grant.grant_id).slice(-6)}`]);
+    const register = d.can_manage ? `<details class="cc-card" id="cc-agent-register"><summary>登记智能体用途</summary><form id="cc-agent" class="cc-form"><div class="cc-two">
+        ${field("显示名称", '<input name="label" maxlength="80" required>')}
+        ${field("类型", '<select name="kind"><option value="work_cloud">Work Cloud · 只读分析</option><option value="dot">dot · 协调与汇总</option></select>')}</div>
+        ${field("现有只读连接", `<select name="grant_id" required>${options(available, "", available.length ? "选择现有连接" : "没有可用的只读连接")}</select>`)}
+        <small>这里只绑定现有授权，不创建凭据或扩大权限。只读连接指只有读取权限的访问令牌或 OAuth 授权；没有候选时，请在「访问令牌」创建只读令牌（可限定项目），
+          或在 ChatGPT 授权时只勾选读取。</small><div><button type="submit">确认登记 7 天</button></div></form></details>` : "";
+    return `<section class="cc-stack">${joining()}<details class="cc-advanced" data-cc-keep="advanced"><summary>高级：任务用途绑定与事件订阅</summary><h2>独立任务资格</h2>
+      <p class="cc-hint">登记、订阅有效和最近响应是三件事。同一连接中的聊天不能仅凭名字彼此隔离。</p>
+      ${(d.agents || []).map((agent) => `<article class="cc-card cc-agent-card"><div class="cc-row"><strong>${E(agent.label)} <small>${agent.kind === "dot" ? "dot" : "Work Cloud"} · ${E(agent.id.slice(-6))}</small></strong>${badge(agent.binding_status)}</div>
+        <dl class="cc-facts"><div><dt>有效订阅</dt><dd>${E(agent.valid_subscriptions)}</dd></div><div><dt>最近领取</dt><dd>${E(when(agent.last_claim))}</dd></div>
+          <div><dt>最近结果</dt><dd>${E(when(agent.last_result))}</dd></div><div><dt>连接</dt><dd>${E(grantLabel(agent.grant_id) || String(agent.grant_id).slice(-8))}</dd></div></dl>
+        <small>用途绑定到期：${E(when(agent.expires_at))} · 原始聊天身份未做密码学验证</small>
+        ${d.can_manage ? `<div class="cc-actions">${button(agent.enabled ? "agent_disable" : "agent_enable", agent.enabled ? "停用此用途" : "启用此用途", agent)}${button("agent_renew", "确认续期 7 天", agent)}</div>` : ""}</article>`).join("")
+        || empty("先在目标 Work 或 dot 聊天连接一个只读的 WebCoder 连接，再登记其用途。")}${register}
+      <h2>事件订阅</h2>${(d.subscriptions || []).map((sub) => `<article class="cc-card"><div class="cc-row"><strong>${E(eventName(sub.name))}</strong>${badge(sub.state)}</div>
+        <p>${E(sub.arguments?.queue || "项目结果与状态")} · ${E(sub.id.slice(-8))}${grantLabel(sub.grant_id) ? ` · ${E(grantLabel(sub.grant_id))}` : ""}</p>
+        <dl class="cc-facts"><div><dt>到期</dt><dd>${E(when(sub.expires_at))}</dd></div><div><dt>最近接收</dt><dd>${E(when(sub.last_accepted))}</dd></div></dl>
+        <small>接收回执不代表已领取或用户已读。回调地址与签名材料不在面板显示。</small>
+        ${d.can_manage ? `<div class="cc-actions">${button("subscription_test", "发送无敏感测试事件", sub)}${button(sub.state === "paused" ? "subscription_resume" : "subscription_pause",
+          sub.state === "paused" ? "恢复投递" : "暂停投递", sub)}</div>` : ""}</article>`).join("")
+        || empty("订阅必须由对应的 Work / dot 聊天发起。面板不会代替用户创建或控制聊天。")}
+      ${d.subscriptions_next_cursor ? button("more", "加载更多订阅", {}, 'data-kind="subscriptions"') : ""}</details></section>`;
+  }
+
+  const HEADER = `<header class="cc-heading"><div><span class="cc-eyebrow">WebCoder · 协作中心</span><h1 tabindex="-1">协作中心</h1>
+    <p>让目标、任务和证据在同一处衔接。</p></div></header>`;
+
+  function introPage(content) {
+    return `<div class="collaboration cc-page">${HEADER}${content}<dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
+  }
+
+  function updateNav(enabled) {
+    panel.collaboration = enabled;
+    const link = document.querySelector('#nav a[data-route="collaboration"]');
+    if (link) link.hidden = !enabled;
+  }
+
+  async function html() {
+    const identity = sessionIdentity();
+    if (state.identity !== identity) {
+      state.identity = identity;
+      state.requests.clear();
+      state.chats.clear();
+      state.rooms = [];
+      state.grants = [];
+      if (!state.project) {
+        try {
+          const saved = JSON.parse(sessionStorage.getItem(SELECTION_KEY) || "null");
+          if (saved?.user === panel.session?.username) {
+            state.project = saved.project || "";
+            state.environment = saved.environment || "production";
+            state.conversation = saved.conversation || "";
+          }
+        } catch {
+          // nothing remembered
+        }
+      }
+      resetScope();
+    }
+    const gen = state.generation;
+    const status = await api("/api/collaboration/status");
+    updateNav(Boolean(status.features?.enabled));
+    if (!status.features?.enabled) {
+      state.snapshot = null;
+      return introPage(`<section class="cc-card cc-intro"><h2>协作中心尚未启用</h2><p>当前没有启动采集、创建订阅或派发分析任务；原有项目功能不受影响。</p>
+        <p>部署维护者可在运行 Hub 的服务器上设置环境变量 <code>WEBCODER_COLLABORATION_ENABLED=true</code> 后重启 Hub。需要向 dot / Work 聊天推送通知时，
+        再加 <code>WEBCODER_MCP_EVENTS_ENABLED=true</code>；固定探针采集和异常分析派发分别由 <code>WEBCODER_MONITOR_COLLECTOR_ENABLED</code>、
+        <code>WEBCODER_ANALYSIS_DISPATCH_ENABLED</code> 控制。</p></section>`);
+    }
+    const { projects } = await api("/api/projects");
+    if (gen !== state.generation) return "";
+    state.projects = projects || [];
+    if (state.pendingProject) {
+      const wanted = state.pendingProject.toLowerCase();
+      const match = state.projects.find((p) => p.id === state.pendingProject || String(p.alias).toLowerCase() === wanted);
+      state.pendingProject = "";
+      history.replaceState(null, "", "#/collaboration"); // a deep link opens the project once, not on every reload
+      if (match) { // the project's own room, even if another room with this project is open
+        if (match.id !== state.project || state.conversation) resetScope();
+        state.project = match.id;
+        state.conversation = "";
+      }
+    }
+    if (!state.projects.some((project) => project.id === state.project)) {
+      state.project = state.projects[0]?.id || "";
+      state.conversation = "";
+    }
+    if (!state.project) {
+      return introPage(`<section class="cc-card cc-intro"><h2>还没有项目</h2><p>协作室按项目建立。请先在「项目」页面把设备上的一个文件夹建成项目。</p>
+        <p><a href="#/projects">前往项目 ›</a></p></section>`);
+    }
+    let data;
+    try {
+      data = await getRecord("overview", "");
+    } catch (error) {
+      if (error.stale || !state.conversation || !["CONVERSATION_NOT_FOUND", "CONVERSATION_PROJECT_MISMATCH"].includes(error.code)) throw error;
+      state.conversation = ""; // the remembered room no longer includes this project: open the project's own room
+      state.notes = "原聊天室已不可用或不包含这个项目，已打开项目默认房间。";
+      state.error = true;
+      data = await getRecord("overview", "");
+    }
+    const grants = data.can_manage ? (await api("/api/collaboration/grants")).grants : [];
+    if (gen !== state.generation) return "";
+    state.snapshot = data;
+    state.conversation = data.conversation?.id || "";
+    persistSelection();
+    state.grants = grants || [];
+    if (data.room && data.capabilities?.plain_messages) {
+      const c = chat();
+      if (!c.changesReady) await startChangeFeed(data.room.id);  // the feed's position first, then the snapshot
+      const [timeline, rooms, members] = await Promise.all([
+        getRecord("timeline", "", "", { room_id: data.room.id, limit: "100" }),
+        data.conversation ? api("/api/collaboration/conversations") : getRecord("rooms", ""),
+        getRecord("members", ""),
+      ]);
+      if (gen !== state.generation) return "";
+      if (c.visibility && c.visibility !== timeline.visibility_token) clearVisibility(c, true);
+      c.visibility = timeline.visibility_token;
+      mergeMessages(timeline.items || []);
+      c.after = timeline.after_cursor || "";
+      c.older = timeline.next_cursor || "";
+      c.initialized = true;
+      state.rooms = rooms.items || [];
+      state.members = members.items || [];
+    }
+    await coordination.load(data);
+    if (gen !== state.generation) return "";
+    const selection = `<form id="cc-scope" class="cc-scope">${field("项目", `<select name="project">${options(state.projects.map((project) =>
+      [project.id, project.alias || project.id]), state.project)}</select>`)}${field("环境", `<input name="environment" value="${E(state.environment)}"
+      pattern="[A-Za-z0-9][A-Za-z0-9_.\\-]*" maxlength="64" required>`)}<div class="cc-scope-actions"><button type="submit">切换</button>${data.room ? "" : button("refresh", "刷新状态")}
+      ${data.room && data.can_manage ? button(data.room.state === "paused" ? "resume" : "pause", data.room.state === "paused" ? "恢复协作室" : "暂停协作室", data.room) : ""}</div></form>`;
+    const feedback = `<p id="cc-feedback" class="cc-feedback ${state.error ? "is-error" : ""}" role="status" aria-live="polite">${E(state.notes)}</p>`;
+    if (!data.room) {
+      return `<div class="collaboration cc-page" data-project="${E(state.project)}" data-environment="${E(state.environment)}">${HEADER}${selection}${feedback}
+        <section class="cc-card cc-intro"><h2>开启这个项目的共享讨论室</h2><p>创建讨论室只保存协作记录，不代表授权采集、添加订阅或执行代码。</p>
+        ${data.can_manage ? `<div class="cc-actions">${button("create-room", `创建「${projectLabel(state.project)}」的项目讨论室`, {}, "", "primary")}
+          ${button("new-conversation", "新建独立聊天室（可选多个项目）")}</div>` : empty("仅项目所有者可以创建讨论室。")}</section>
+        <dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
+    }
+    const tabs = [["discussion", "讨论"], ["jobs", "目标与任务"], ["monitor", "监控与诊断"], ["agents", "智能体与订阅"]];
+    const body = { discussion, jobs, monitor: monitoring, agents }[state.view]();
+    const project = state.projects.find((p) => p.id === state.project);
+    return `<div class="collaboration cc-chat-shell ${state.view === "discussion" ? "is-discussion" : "is-management"}" data-project="${E(state.project)}"
+      data-environment="${E(state.environment)}" data-conversation="${E(state.conversation)}"><h1 class="cc-sr-only" tabindex="-1">协作中心</h1>${roomRail(selection)}
+      <section class="cc-room-body"><header class="cc-room-header"><div><div class="cc-room-title"><h2>${E(data.conversation ? conversationTitle(data.conversation)
+        : data.room.title || project?.alias || state.project)}</h2><span class="cc-status">${E(state.environment)}</span>${data.room.state === "paused" ? badge("paused") : ""}</div>
+        <p>让讨论、决定和结果，在同一个地方相遇。</p></div><div class="cc-header-tools"><details class="cc-room-menu"><summary data-cc-more aria-label="房间更多选项">···</summary>
+        <div>${button("room-settings", "切换房间")}${button("new-conversation", "新建独立聊天室")}${coordination.action("创建协作目标")}
+          ${data.capabilities?.message_search ? button("search", "搜索消息") : ""}${button("context", "房间上下文")}${button("refresh", "刷新状态")}
+          ${data.can_manage ? button(data.room.state === "paused" ? "resume" : "pause", data.room.state === "paused"
+            ? `恢复「${projectLabel(state.project)}」协作室` : `暂停「${projectLabel(state.project)}」协作室`, data.room) : ""}</div></details></div></header>
+      ${projectChips()}${memberStrip()}<nav class="cc-tabs" aria-label="协作中心视图">${tabs.map(([id, label]) =>
+        `<button type="button" class="${id === state.view ? "is-active" : ""}" data-cc-view="${id}" aria-pressed="${id === state.view}">${label}</button>`).join("")}</nav>
+      ${feedback}<div class="cc-main">${body}</div></section><aside class="cc-context-rail">${contextContents()}</aside>
+      <dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
+  }
+
+  async function act(action, element) {
+    const local = { local: true, message: "" };
+    if (action.startsWith("goal-")) return coordination.act(action, element);
+    if (["result", "thread", "source"].includes(action)) {
+      const origin = element.closest("[data-message-id]");
+      if (origin?.dataset.project && (origin.dataset.project !== state.project || origin.dataset.environment !== state.environment)) {
+        if (!(await selectPartition(origin.dataset.project, origin.dataset.environment))) return local;
+      }
+    }
+    if (action === "close-rooms") {
+      document.querySelector(".cc-room-rail")?.classList.remove("is-open");
+      document.querySelector("[data-cc-more]")?.focus();
+      return local;
+    }
+    if (action === "new-conversation" || action === "add-project") {
+      const adding = action === "add-project";
+      const existing = roomProjects();
+      const choices = state.projects.filter((p) => !adding || !existing.some((v) => v.project_id === p.id && v.environment_id === state.environment));
+      showDrawer(adding ? "在这个房间添加项目" : "新建独立聊天室", `<p>${adding ? "保留当前房间 ID、消息历史、草稿和原任务归属。" : "选择一个或多个项目，在独立的房间里讨论。"}</p>
+        <form id="${adding ? "cc-add-project" : "cc-new-conversation"}" class="cc-form" data-version="${E(state.snapshot?.conversation?.version || 0)}">
+        ${adding ? "" : field("房间名称", '<input name="title" maxlength="120" required placeholder="为这个讨论起个名字">')}
+        ${adding ? field("要加入的项目", `<select name="project" required>${options(choices.map((p) => [p.id, p.alias || p.id]), "", "请选择一个已授权项目")}</select>`)
+          : `<fieldset class="cc-project-choices"><legend>参与项目（至少一个）</legend>${choices.map((p) => `<label><input type="checkbox" name="projects" value="${E(p.id)}"
+            ${choices.length === 1 || p.id === state.project ? "checked" : ""}>${E(p.alias || p.id)}</label>`).join("")}</fieldset>`}
+        ${field("项目环境", `<input name="environment" value="${E(state.environment)}" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.\\-]*" required>`)}
+        <p class="cc-hint">项目加入不扩大任何连接权限。每条消息、回复和任务保留来源项目；助手连接只能读取自己已有权的项目。新房间的发言许可和 @ 订阅需要分别确认。</p>
+        <label><input name="confirm" type="checkbox" required> 已核对项目与房间范围</label>
+        <div><button class="primary" type="submit" ${choices.length ? "" : "disabled"}>${adding ? "确认添加项目" : "创建聊天室"}</button></div></form>`, element);
+      return local;
+    }
+    if (action === "mention-copy") {
+      const area = element.closest(".cc-speaking").querySelector(".cc-mention-instruction");
+      area.focus();
+      area.select();
+      area.setSelectionRange(0, area.value.length);
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(area.value);
+          return { local: true, message: "已复制 @ 提醒订阅指令。请在对应的原聊天完成宿主确认。" };
+        }
+      } catch {
+        // The selection stays: the system copy command still works.
+      }
+      return { local: true, message: "已选中指令，请使用系统复制。" };
+    }
+    if (action === "message-access") {
+      const enabled = element.dataset.enabled === "true";
+      showDrawer(enabled ? "允许连接参与房间讨论" : "撤回连接的房间发言许可", `<p>${enabled ? "这个现有连接将能够在当前房间读取获准记录并发言，有效期 7 天。"
+        : "这个连接将不能再通过房间发言接口发送新消息。"}</p><p>同一授权下的多个聊天共享这项许可，无法仅凭 dot 或 Work 标签隔离原生聊天身份。不会创建任务用途、凭据或代码执行权限。</p>
+        <form id="cc-message-access" class="cc-form" data-grant="${E(element.dataset.id)}" data-version="${E(element.dataset.speakingVersion)}" data-enabled="${enabled}">
+        <label><input type="checkbox" name="confirm" required> 我已核对连接 ${E(grantLabel(element.dataset.id) || "")} ${E(element.dataset.id.slice(-8))} 与当前房间范围</label>
+        <div><button class="primary" type="submit">${enabled ? "确认允许这个连接发言" : "确认撤回发言许可"}</button></div></form>`, element);
+      return local;
+    }
+    if (action === "open-members") {
+      rememberChat();
+      state.view = "agents";
+      await rerender();
+      return local;
+    }
+    if (action === "close-drawer") {
+      closeDrawer();
+      return local;
+    }
+    if (action === "latest") {
+      const feed = document.querySelector(".cc-feed");
+      feed.scrollTop = feed.scrollHeight;
+      chat().unread = 0;
+      document.querySelector(".cc-new-messages").hidden = true;
+      return local;
+    }
+    if (action === "context") {
+      showDrawer("房间上下文", contextContents(), element);
+      return local;
+    }
+    if (action === "room-settings") {
+      const rail = document.querySelector(".cc-room-rail");
+      rail.classList.toggle("is-open");
+      const details = rail.querySelector("details");
+      if (details) {
+        details.open = true;
+        details.querySelector("select")?.focus();
+      }
+      return local;
+    }
+    if (action === "search") {
+      showDrawer("搜索房间消息", `<form id="cc-search" class="cc-form">${field("关键词", '<input name="query" maxlength="200" required>')}
+        <div><button type="submit">搜索</button></div></form><div class="cc-search-results"></div>`, element);
+      return local;
+    }
+    if (action === "mentions") {
+      const slots = notificationSlots();
+      showDrawer("选择提醒对象", `<p>只向你点选的通知位置发送提醒，不创建任务。纯文本 @ 不会派发。</p>${slots.map((s) =>
+        `<button type="button" class="cc-mention-option" data-cc-action="pick-mention" data-id="${E(s.id)}" aria-pressed="${chat().mentions.includes(s.id)}">
+        <strong>${E(s.label)}</strong><span>${s.kind === "dot" ? "dot" : "Work"} · ${E(s.id.slice(-6))}</span><small>${E(text(joinStatus(s)))} · 原生聊天身份未验证</small></button>`).join("")
+        || empty("还没有通知位置。先在智能体与订阅中完成加入。")}<p class="cc-hint">同一授权可能供多个聊天使用，位置名称不构成身份隔离。
+        没有订阅 @ 提醒的位置只会记录提及，不会收到通知。</p><div class="cc-actions">${button("close-drawer", "完成")}</div>`, element);
+      return local;
+    }
+    if (action === "pick-mention" || action === "remove-mention") {
+      const c = chat();
+      const id = element.dataset.id;
+      c.mentions = c.mentions.includes(id) ? c.mentions.filter((v) => v !== id) : [...c.mentions, id];
+      element.setAttribute("aria-pressed", String(c.mentions.includes(id)));
+      patchDraftContext();
+      return local;
+    }
+    if (action === "reply" || action === "clear-reply") {
+      const source = action === "reply" ? messageById(element.dataset.id) : null;
+      if (source?.project_id && (source.project_id !== state.project || source.environment_id !== state.environment)) {
+        if (!(await selectPartition(source.project_id, source.environment_id))) return local;
+      }
+      chat().reply = action === "reply" ? element.dataset.id : "";
+      if (element.closest("#cc-drawer")) closeDrawer(); // replying from a thread: back to the composer
+      patchDraftContext();
+      document.querySelector("#cc-message-input")?.focus();
+      return local;
+    }
+    if (action === "source") {
+      const id = element.dataset.id;
+      const node = [...document.querySelectorAll(".cc-feed [data-message-id]")].find((n) => n.dataset.messageId === id);
+      if (node) {
+        closeDrawer();
+        node.scrollIntoView({ block: "center" });
+        node.tabIndex = -1;
+        node.focus({ preventScroll: true });
+      } else {
+        const result = await readDrawer("thread", id, "来源消息", element);
+        if (result) showDrawer("来源消息", (result.items || []).map(messageMarkup).join("") || empty("来源当前不可访问。"), element);
+      }
+      return local;
+    }
+    if (action === "thread") {
+      const result = await readDrawer("thread", element.dataset.id, "话题与回复", element);
+      if (result) showDrawer("话题与回复", (result.items || []).map(messageMarkup).join("") || empty("暂无更多回复。"), element);
+      return local;
+    }
+    if (action === "convert") {
+      const m = messageById(element.dataset.id);
+      const workers = eligibleWorkers();
+      if (!m) throw new Error("来源消息已改变，请刷新。");
+      if (m.project_id && (m.project_id !== state.project || m.environment_id !== state.environment)) {
+        if (!(await selectPartition(m.project_id, m.environment_id))) return local;
+        const trigger = [...document.querySelectorAll('.cc-feed [data-cc-action="convert"]')].find((n) => n.dataset.id === m.id);
+        return trigger ? act("convert", trigger) : local;
+      }
+      const allowed = state.snapshot.capabilities?.task_assignment && workers.length;
+      showDrawer("把讨论转为任务", `<p>确认后才会创建一个只读任务。通知位置不能直接担任执行者。</p>
+        <div class="cc-source-quote"><small>来源消息</small><p class="cc-prose">${E(messageText(m))}</p></div>
+        ${allowed ? "" : '<p class="cc-task-blocker" role="status">当前没有可用的只读任务执行者，或服务未启用任务指派。先在智能体与订阅中核对独立任务资格；你的消息已保留。</p>'}
+        <form id="cc-task-review" class="cc-form" data-message-id="${E(m.id)}" data-version="${E(m.version || 1)}">
+        ${field("任务所属项目", `<select name="target_project" required>${options([[state.project, `${projectLabel(state.project)} · ${state.environment}`]], "", "明确确认来源项目")}</select>`)}
+        ${field("执行者", `<select name="assignee" required ${allowed ? "" : "disabled"}>${options(workers.map((a) => [a.id, `${a.label} · ${a.kind === "dot" ? "dot" : "Work"} · ${a.id.slice(-6)}`]),
+          "", "明确选择合格执行者")}</select>`)}
+        ${field("只读任务类型", '<select name="kind"><option value="analyze_incident">只读异常分析（需 Work Cloud）</option><option value="propose_monitor_plan">编制监控草稿</option><option value="summarize_result">汇总结论（需 dot）</option></select>')}
+        ${field("任务范围", `<textarea name="request" maxlength="4000" rows="4" required>${E(messageText(m))}</textarea>`)}
+        ${field("验收要求", '<textarea name="acceptance" maxlength="2000" rows="2" required>提交带证据的结论；恢复由独立探针验证。</textarea>')}
+        <p class="cc-hint">共享本条来源消息及上述范围。不授予代码修改、命令执行、部署或新的凭据权限。</p>
+        <label><input name="confirm" type="checkbox" required ${allowed ? "" : "disabled"}> 我已核对执行者、来源消息与只读范围</label>
+        <div><button type="submit" class="primary" ${allowed ? "" : "disabled"}>确认创建只读任务</button></div></form>`, element);
+      return local;
+    }
+    if (action === "result") {
+      const kind = element.dataset.recordKind || "job";
+      if (kind === "message") return act("thread", element);
+      const record = await readDrawer(kind, element.dataset.id, "任务、结果与证据", element);
+      if (!record) return local;
+      const results = record.results || (record.body ? [record] : []);
+      const job = record.job || record;
+      showDrawer("任务、结果与证据", `<p>${badge(job.state)} ${E(jobProgress(job))}</p>${job.context?.origin_message_id
+        ? button("source", "查看来源消息", { id: job.context.origin_message_id }, "", "small") : ""}${results.map((r) => `<section class="cc-result"><h3>${E(outcomes[r.body?.outcome] || text(r.body?.outcome))}</h3>
+        <p class="cc-prose">${E(r.body?.summary)}</p>${(r.body?.observations || []).map((o) => `<p>${E(o.claim)}</p>${(o.evidence_refs || []).map((id) =>
+          `<details data-cc-detail="evidence" data-result-id="${E(r.id)}" data-id="${E(id)}"><summary>查看授权证据</summary><div class="cc-detail"></div></details>`).join("")}`).join("")}
+        ${(r.body?.limitations || []).map((v) => `<p class="cc-hint">${E(v)}</p>`).join("")}</section>`).join("") || empty("尚无提交的结果；已领取与已完成分别记录。")}
+        <details><summary>技术记录与诊断</summary>${json(record)}</details>`, element);
+      return local;
+    }
+    if (action === "older-messages") {
+      const generation = state.generation;
+      const c = chat();
+      const feed = document.querySelector(".cc-feed");
+      const top = feed.scrollTop;
+      const height = feed.scrollHeight;
+      const page = await getRecord("timeline", "", c.older, { room_id: state.snapshot.room.id, limit: "100" });
+      if (generation !== state.generation || c !== chat()) return local;
+      mergeMessages(page.items || []);
+      c.older = page.next_cursor || "";
+      patchTimeline();
+      feed.scrollTop = top + feed.scrollHeight - height;
+      c.unread = 0;
+      feed.querySelector(".cc-history").innerHTML = c.older ? button("older-messages", "加载更早消息", {}, "", "small") : "";
+      document.querySelector(".cc-new-messages").hidden = true;
+      return local;
+    }
+    if (action === "retry-directory") {
+      await recoverAccess();
+      return local;
+    }
+    if (action === "refresh") {
+      state.notes = "";
+      state.error = false;
+      if (state.view === "discussion" && state.snapshot?.room && state.snapshot?.capabilities?.plain_messages) {
+        await refreshChat();
+        return { local: true, message: "状态已刷新。" };
+      }
+      // Only a newly committed page may announce success: a failed read shows its error instead.
+      if (await rerender()) setFeedback("状态已刷新。", false);
+      return local;
+    }
+    if (action === "create-room") {
+      const result = await mutation("room", {});
+      return { ...result, message: "项目讨论室已创建。它只保存协作记录，不授权采集、订阅或执行代码。" };
+    }
+    if (action.startsWith("join-")) {
+      const slot = (state.snapshot.join_slots || []).find((row) => row.id === element.dataset.id);
+      if (!slot) throw new Error("这个聊天位置已改变，请刷新状态。");
+      if (["join-copy", "join-select"].includes(action)) {
+        const instruction = joinInstruction(slot);
+        if (!instruction) {
+          expireInvitations(element.closest(".collaboration"));
+          throw new Error("当前指令不可用，请刷新并核对位置、授权与订阅状态。");
+        }
+        const area = element.closest("[data-cc-slot]").querySelector(".cc-join-instruction");
+        area.focus();
+        area.select();
+        area.setSelectionRange(0, area.value.length);
+        if (action === "join-copy") {
+          try {
+            if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+            await navigator.clipboard.writeText(instruction);
+            return { local: true, message: "已复制。请粘贴到这个位置对应的真实 dot / Work 聊天并发送。" };
+          } catch {
+            // Selection is already in place. Never ask for clipboard permission or read the clipboard.
+          }
+        }
+        return { local: true, message: "已选中完整指令。请用系统复制，再粘贴到对应聊天并发送。" };
+      }
+      if (action === "join-revoke" && !confirm(`撤销聊天位置「${slot.label}」？关联的事件订阅会一并停止，之后需要重新创建位置。`)) return local;
+      return mutation("join-slot-control", { slot_id: slot.id, expected_version: Number(element.dataset.version), action: action.slice(5) });
+    }
+    if (action === "plan-template") {
+      const form = document.querySelector("#cc-plan");
+      const probe = form.elements.probe.value;
+      if (!probe) throw new Error("先选择一个已登记的固定探针。");
+      const candidate = {
+        schema_version: 1,
+        intent: "观察固定只读入口的可达性与恢复情况",
+        valid_until: new Date(Date.now() + 7 * 86400000).toISOString(),
+        interval_seconds: 60,
+        assignee_agent_id: form.elements.monitor_assignee.value,
+        rules: [{
+          rule_id: "http_availability", probe_id: probe, metric: "availability", window_seconds: 300, min_samples: 3,
+          open_when: { operator: "lt", value: 0.8 }, close_when: { operator: "gt", value: 0.99 }, open_consecutive_windows: 3,
+          close_consecutive_windows: 5, sample_freshness_seconds: 180, severity: "high", require_recovery_probe: form.elements.recovery.value || probe,
+        }],
+      };
+      state.draft.plan_json = JSON.stringify(candidate, null, 2);
+      form.elements.plan_json.value = state.draft.plan_json;
+      return { local: true, message: "已生成草稿；请审阅目标、阈值和期限后保存。" };
+    }
+    if (action === "validate-plan") {
+      await mutation("plan-validate", { candidate: parsePlan(document.querySelector("#cc-plan").elements.plan_json.value) });
+      return { local: true, message: "计划校验通过；尚未保存或激活。" };
+    }
+    if (action === "activate-plan") {
+      const consent = document.querySelector("#cc-approval");
+      if (!consent?.checked || consent.dataset.digest !== element.dataset.digest) throw new Error("请先审阅并勾选这个不可变版本的批准范围。");
+      const result = await mutation("plan-activate", { plan_version: Number(element.dataset.planVersion),
+        expected_version: Number(element.dataset.version), digest: element.dataset.digest });
+      return { ...result, message: result.collector_enabled ? `已批准并激活 v${result.plan_version}：Hub 将按批准的固定 GET 目标采集。`
+        : `已批准并激活 v${result.plan_version}；采集开关未启用，暂不会采集。` };
+    }
+    if (action === "more") {
+      const kind = element.dataset.kind;
+      const generation = state.generation;
+      const snapshot = state.snapshot;
+      const page = await getRecord(kind, "", snapshot[`${kind}_next_cursor`]);
+      if (generation !== state.generation || snapshot !== state.snapshot || !onPage()) return local;
+      state.snapshot[kind].push(...(page.items || []));
+      state.snapshot[`${kind}_next_cursor`] = page.next_cursor;
+      const render = { jobs, incidents: monitoring, subscriptions: agents }[kind];
+      document.querySelector(".cc-main").innerHTML = render();
+      bindDetails();
+      return { local: true, message: "已加载更多记录。" };
+    }
+    const destructive = { cancel: "取消这个只读任务？已发出的外部处理不会因此被证明已停止。", reject_proposal: "不批准这条助手建议？",
+      pause: "暂停协作室？进行中的只读任务会被阻塞，之后需要明确重试。", agent_disable: "停用这个用途绑定？它的未完成任务会被阻塞。",
+      plan_pause: "暂停这个监控计划？采集会停止。" };
+    if (destructive[action] && !confirm(destructive[action])) return local;
+    const result = await mutation("control", { action, target_id: element.dataset.id, expected_version: Number(element.dataset.version),
+      reason: `用户在协作面板明确确认：${element.textContent.trim()}` });
+    return controlNotes[action] ? { ...result, message: controlNotes[action] } : result;
+  }
+
+  // What a confirmed control did (accept_proposal reports its new task's delivery state instead).
+  const controlNotes = {
+    pause: "协作室已暂停；进行中的只读任务已阻塞，恢复后需要逐个明确重试。",
+    resume: "协作室已恢复；被阻塞的任务不会自动继续，需要逐个明确重试。",
+    cancel: "只读任务已取消；已发出的外部处理不会因此被证明已停止。",
+    retry: "已在原期限和次数内重新排队；排队不代表已被领取。",
+    verify_goal: "已核对证据并验收这个只读任务目标。",
+    reject_proposal: "已不批准这条建议，未创建任务。",
+    agent_disable: "用途已停用；它的未完成任务已阻塞。",
+    agent_enable: "用途已重新启用；登记不代表助手在线。",
+    agent_renew: "用途绑定已续期 7 天。",
+    subscription_pause: "订阅已暂停投递。",
+    subscription_resume: "订阅已恢复投递；接收回执仍不代表已读。",
+    subscription_test: "测试事件已排队；请到对应聊天核对，接收回执不代表已读。",
+    plan_pause: "监控计划已暂停，采集停止。",
+  };
+
+  function parsePlan(source) {
+    try {
+      return JSON.parse(source);
+    } catch (error) {
+      throw new Error(`计划 JSON 格式不正确：${error.message}`);
+    }
+  }
+
+  async function submit(form) {
+    if (form.id.startsWith("cc-goal-") || form.classList.contains("cc-goal-assign")) return coordination.submit(form);
+    const data = Object.fromEntries(new FormData(form));
+    if (["cc-new-conversation", "cc-add-project"].includes(form.id)) {
+      if (!form.elements.confirm.checked) throw new Error("请先确认项目与房间范围。");
+      const adding = form.id === "cc-add-project";
+      const generation = state.generation;
+      const selected = new FormData(form).getAll("projects");
+      if (!adding && !selected.length) throw new Error("请选择至少一个项目。");
+      const payload = adding
+        ? { conversation_id: state.conversation, expected_version: Number(form.dataset.version), project: data.project, environment_id: data.environment }
+        : { title: data.title.trim(), projects: selected.map((project) => ({ project, environment_id: data.environment })) };
+      const operation = adding ? "conversation-project" : "conversation";
+      const identity = await commandIdentity({ operation, ...payload });
+      if (generation !== state.generation) return { local: true };
+      try {
+        const result = await api(`/api/collaboration/${operation}`, { method: "POST", body: { ...payload, idempotency_key: identity.identifier } });
+        if (generation !== state.generation) return { local: true };
+        settle(identity);
+        const room = result.conversation || result;
+        closeDrawer();
+        rememberChat();
+        if (!adding) {
+          state.conversation = room.id;
+          state.project = room.projects?.[0]?.project_id || selected[0];
+          state.environment = room.projects?.[0]?.environment_id || data.environment;
+          state.view = "discussion";
+          resetScope();
+        }
+        state.notes = adding ? "项目已加入当前房间。原消息、草稿与任务归属保持不变。" : "独立聊天室已创建。";
+        state.error = false;
+        persistSelection();
+        await rerender();
+        return { local: true, message: state.notes };
+      } catch (error) {
+        if (error.stale || generation !== state.generation) return { local: true };
+        form.elements.confirm.checked = false;
+        if (error.status === 409 || error.code === "STALE_VERSION") {
+          closeDrawer();
+          state.notes = `${error.message}。房间项目已改变，请重新审阅后添加。`;
+          state.error = true;
+          await rerender();
+          return { local: true, message: state.notes };
+        }
+        throw error;
+      }
+    }
+    if (form.id === "cc-scope") {
+      if (state.project !== data.project || state.environment !== data.environment) resetScope();
+      state.project = data.project;
+      state.environment = data.environment;
+      state.conversation = "";
+      persistSelection();
+      await rerender();
+      return { local: true, message: "" };
+    }
+    if (form.id === "cc-command") {
+      if (!state.snapshot.capabilities?.plain_messages) throw new Error("当前服务尚未支持普通消息。");
+      const c = chat();
+      const generation = state.generation;
+      const room = state.snapshot.room.id;
+      const payload = { ...chatScope(), room_id: room, body_text: String(data.request || "").trim(), reply_to_id: c.reply,
+        mentions: c.mentions.map((slot_id) => ({ slot_id })) };
+      if (!payload.body_text) throw new Error("先写一条消息。");
+      const identity = await commandIdentity({ operation: "message", ...payload });
+      if (generation !== state.generation || c !== chat()) throw new Error("登录或房间已改变；未发送旧消息。");
+      const result = await api("/api/collaboration/message", { method: "POST",
+        body: { ...payload, client_message_id: identity.identifier, idempotency_key: identity.identifier } });
+      if (generation !== state.generation || c !== chat()) return { local: true };
+      settle(identity);
+      // A new draft typed while saving must not be erased by the older response.
+      if (form.elements.request.value.trim() === payload.body_text) {
+        c.draft = "";
+        c.reply = "";
+        c.mentions = [];
+        form.elements.request.value = "";
+        patchDraftContext();
+      }
+      if (result.message?.id) mergeMessages([result.message]);
+      await refreshChat(true);
+      const receipts = Array.isArray(result.notifications) ? result.notifications : Object.values(result.notifications || {});
+      const failed = receipts.some((v) => v && typeof v === "object" && !["queued", "pending", "accepted"].includes(v.state || v.status));
+      return { local: true, message: payload.mentions.length
+        ? `消息已保存。${failed ? "部分提醒未送达（见消息上的提醒状态），可在智能体与订阅中核对；请勿重发正文。" : "已按所选位置排队提醒；接收不代表已读或回应。"}`
+        : "消息已保存，未创建任务。" };
+    }
+    if (form.id === "cc-task-review") {
+      if (data.target_project !== state.project) throw new Error("请明确确认本次任务所属项目。");
+      if (!form.elements.confirm.checked) throw new Error("请先核对并确认本次只读任务范围。");
+      if (!eligibleWorkers().some((a) => a.id === data.assignee)) throw new Error("这个执行者当前没有可用任务资格，请核对智能体与订阅。");
+      const generation = state.generation;
+      const result = await mutation("message-to-task", { room_id: state.snapshot.room.id, message_id: form.dataset.messageId,
+        expected_message_version: Number(form.dataset.version), assignee_agent_id: data.assignee, kind: data.kind, request: data.request,
+        acceptance: data.acceptance });
+      if (generation !== state.generation) return { local: true };
+      closeDrawer();
+      await refreshChat();
+      return { local: true, message: `已按确认范围创建只读任务。${text(result.delivery_status || result.state)}` };
+    }
+    if (form.id === "cc-message-access") {
+      if (!form.elements.confirm.checked) throw new Error("请先确认连接和房间范围。");
+      const generation = state.generation;
+      try {
+        const result = await mutation("message-access", { room_id: state.snapshot.room.id, grant_id: form.dataset.grant,
+          expected_version: Number(form.dataset.version), enabled: form.dataset.enabled === "true", expires_in_days: 7 });
+        if (generation !== state.generation) return { local: true };
+        closeDrawer();
+        return { ...result, message: result.enabled ? "已允许这个连接在本房间发言 7 天；不包含任务或执行权限。" : "已撤回这个连接的房间发言许可。" };
+      } catch (error) {
+        if (error.stale || generation !== state.generation) return { local: true };
+        form.elements.confirm.checked = false;
+        closeDrawer();
+        state.notes = `${error.message}。请重新审阅当前连接权限后确认。`;
+        state.error = true;
+        await rerender();
+        return { local: true, message: state.notes };
+      }
+    }
+    if (form.id === "cc-search") {
+      const generation = state.generation;
+      const result = await getRecord("search", "", "", { query: data.query, room_id: state.snapshot.room.id });
+      if (generation === state.generation && form.isConnected) {
+        form.nextElementSibling.innerHTML = (result.items || []).map((m) => `<article class="cc-card cc-search-hit" data-message-id="${E(m.id)}"
+          data-project="${E(m.project_id || state.project)}" data-environment="${E(m.environment_id || state.environment)}"><small>${E(when(m.created))} · ${E(projectLabel(m.project_id || state.project))}</small>
+          <p class="cc-prose">${E(messageText(m))}</p>${button("source", "查看消息", m, "", "small")}</article>`).join("") || empty("没有匹配的房间消息。");
+      }
+      return { local: true, message: "" };
+    }
+    if (form.id === "cc-join-slot") {
+      const generation = state.generation;
+      const room = state.snapshot.room.id;
+      const payload = { ...scope(), label: data.label.trim(), kind: data.kind, code_ttl_minutes: 30, expires_in_days: 7 };
+      const current = () => generation === state.generation && state.project === payload.project
+        && state.environment === payload.environment_id && state.snapshot?.room?.id === room && onPage();
+      const identity = await commandIdentity({ operation: "join-slot", ...payload });
+      if (!current()) throw new Error("登录或项目范围已改变；未创建旧聊天位置。");
+      const result = await api("/api/collaboration/join-slot", { method: "POST", body: { ...payload, idempotency_key: identity.identifier } });
+      // Keep only the random request ID across reload while the outcome is unknown.
+      // A result on an older page cannot clear a newer page's intent.
+      if (current()) {
+        settle(identity);
+        state.joinDraft = {};
+        if (/^[A-Za-z0-9_-]+$/.test(result.slot?.id || "")) state.reveal = `[data-cc-slot="${result.slot.id}"]`;
+      }
+      return result;
+    }
+    if (form.classList.contains("cc-join-confirm")) {
+      if (!form.elements.confirmed_received.checked) throw new Error("请先在对应聊天核对全部当前测试事件，再勾选确认。");
+      return mutation("join-slot-control", { slot_id: form.dataset.slotId, expected_version: Number(form.dataset.version), action: "confirm_chat",
+        confirmed_received: true, test_event_ids: JSON.parse(form.dataset.events) });
+    }
+    if (form.id === "cc-agent") {
+      const result = await mutation("agent", { label: data.label.trim(), kind: data.kind, grant_id: data.grant_id });
+      return { ...result, message: `已登记「${result.label}」的${result.kind === "dot" ? " dot 协调" : " Work Cloud 只读分析"}用途 7 天。登记不代表助手在线，订阅仍需在原聊天完成。` };
+    }
+    if (form.id === "cc-probe") {
+      const result = await mutation("probe", { label: data.label, url: data.url, allow_http: form.elements.allow_http.checked,
+        private_networks: (data.networks || "").split(/\s+/).filter(Boolean) });
+      return { ...result, message: "探针已登记，尚未启动采集。" };
+    }
+    if (form.id === "cc-plan") {
+      const result = await mutation("plan-save", { candidate: parsePlan(data.plan_json), expected_version: state.snapshot.plan?.latest_version || 0 });
+      state.draft = {};
+      return { ...result, message: `已保存草稿 v${result.plan_version}，尚未激活；批准前不会采集。` };
+    }
+    throw new Error("未知的协作表单。");
+  }
+
+  function busyActions() {
+    const root = app.querySelector(".collaboration");
+    if (!root) return () => {};
+    const previous = new Map();
+    let released = false;
+    const navigation = '[data-cc-room], [data-cc-partition], [data-cc-view], [data-cc-open-joins], [data-cc-action="close-drawer"]';
+    const mark = () => {
+      for (const node of root.querySelectorAll('button, input[type="submit"]')) {
+        if (node.matches(navigation) || previous.has(node)) continue;
+        previous.set(node, node.getAttribute("aria-disabled"));
+        node.setAttribute("aria-disabled", "true");
+        node.setAttribute("data-cc-request-busy", "");
+      }
+    };
+    root.setAttribute("aria-busy", "true");
+    mark();
+    const observer = new MutationObserver(mark);
+    observer.observe(root, { childList: true, subtree: true });
+    return () => {
+      if (released) return;
+      released = true;
+      observer.disconnect();
+      for (const [node, value] of previous) {
+        if (value === null) node.removeAttribute("aria-disabled");
+        else node.setAttribute("aria-disabled", value);
+        node.removeAttribute("data-cc-request-busy");
+      }
+      if (!root.inert) root.removeAttribute("aria-busy"); // a detached render owns the stronger inert state
+    };
+  }
+
+  async function readDrawer(kind, id, title, trigger) {
+    showDrawer(title, empty("正在读取当前授权记录…"), trigger);
+    const generation = state.generation;
+    const dismissed = state.drawerEpoch;
+    const current = () => generation === state.generation && dismissed === state.drawerEpoch;
+    try {
+      const result = await getRecord(kind, id);
+      return current() ? result : null;
+    } catch (error) {
+      if (!error.stale && current()) showDrawer(title, empty(error.message), trigger);
+      throw error;
+    }
+  }
+
+  function setFeedback(message, error) {
+    const feedback = document.querySelector("#cc-feedback");
+    if (feedback) {
+      feedback.textContent = message;
+      feedback.classList.toggle("is-error", error);
+    }
+    const dialog = document.querySelector("#cc-drawer");
+    const inside = dialog?.open ? dialog.querySelector(".cc-drawer-feedback") : null;
+    if (inside) {
+      inside.textContent = message;
+      inside.classList.toggle("is-error", error);
+    }
+  }
+
+  async function run(operation) {
+    if (state.busy) return;
+    const token = {};
+    const generation = state.generation;
+    const project = state.project;
+    const environment = state.environment;
+    const current = () => state.busy === token && state.generation === generation && state.project === project
+      && state.environment === environment && onPage();
+    state.busy = token;
+    state.refreshSequence += 1;
+    const releaseBusy = busyActions();
+    state.busyCleanup = releaseBusy;
+    try {
+      const result = await operation();
+      if (!current()) return;
+      state.notes = typeof result?.message === "string" ? result.message
+        : result?.job_id ? `指令已保存。${text(result.delivery_status || result.state)}。` : "操作已保存，请以当前状态为准。";
+      state.error = false;
+      if (!result?.local) await rerender();
+    } catch (error) {
+      if (error.stale) return;
+      if (error.status === 401 && onPage()) { // signed out meanwhile: back to the sign-in page
+        panel.session.authenticated = false;
+        render();
+        return;
+      }
+      if (!current()) return;
+      state.notes = error.message;
+      state.error = true;
+    } finally {
+      const stillCurrent = current();
+      if (state.busy === token) state.busy = false;
+      releaseBusy();
+      if (state.busyCleanup === releaseBusy) state.busyCleanup = null;
+      if (stillCurrent) setFeedback(state.notes, state.error);
+    }
+  }
+
+  async function loadDetail(details, target) {
+    const extra = { ...(details.dataset.projectDiagnostic === "true" ? { conversation_id: "" } : {}),
+      ...(details.dataset.resultId ? { result_id: details.dataset.resultId } : {}),
+      ...(details.dataset.jobId ? { job_id: details.dataset.jobId } : {}) };
+    try {
+      return await getRecord(details.dataset.ccDetail, details.dataset.id, "", extra);
+    } catch (error) {
+      // Evidence opened without a task or result context cannot be read inside a room; the owner may read the
+      // project room's evidence directly (as the monitoring tab does).
+      if (error.code !== "EVIDENCE_CONTEXT_REQUIRED" || details.dataset.ccDetail !== "evidence") throw error;
+      target.textContent = "正在按项目读取证据…";
+      return getRecord("evidence", details.dataset.id, "", { ...extra, conversation_id: "" });
+    }
+  }
+
+  function bindDetails() {
+    document.querySelectorAll("[data-cc-detail]").forEach((details) => {
+      if (details.dataset.bound) return;
+      details.dataset.bound = "true";
+      details.addEventListener("toggle", async () => {
+        if (!details.open || details.dataset.loaded) return;
+        const generation = state.generation;
+        const target = details.querySelector(".cc-detail");
+        target.textContent = "正在读取…";
+        try {
+          const record = await loadDetail(details, target);
+          if (generation !== state.generation || !details.isConnected) return;
+          target.innerHTML = (record.results || []).map((result) => `<section class="cc-result"><strong>${E(outcomes[result.body?.outcome]
+            || text(result.body?.outcome))}</strong>
+            <p class="cc-prose">${E(result.body?.summary)}</p></section>`).join("") + json(record.body || record);
+          details.dataset.loaded = "true";
+        } catch (error) {
+          if (details.isConnected && !error.stale) target.textContent = error.message;
+        }
+      });
+    });
+  }
+
+  function bind() {
+    const root = app.querySelector(".collaboration");
+    if (!root) return;
+    root.inert = false;
+    root.removeAttribute("aria-busy");
+    const boundGeneration = state.generation;
+    const live = () => root.isConnected && !root.inert && boundGeneration === state.generation && onPage();
+    state.viewportCleanup?.();
+    state.viewportCleanup = null;
+    const viewport = window.visualViewport;
+    if (viewport) {
+      const resize = () => root.style.setProperty("--cc-viewport-height", `${viewport.height}px`);
+      viewport.addEventListener("resize", resize);
+      resize();
+      state.viewportCleanup = () => viewport.removeEventListener("resize", resize);
+    }
+    root.addEventListener("click", (event) => {
+      if (!live() || event.target.closest("button")?.disabled) return;
+      const partition = event.target.closest("[data-cc-partition]");
+      if (partition) {
+        selectPartition(partition.dataset.ccPartition, partition.dataset.environment);
+        return;
+      }
+      const room = event.target.closest("[data-cc-room]");
+      if (room) {
+        rememberChat();
+        disableComposer();
+        resetScope();
+        state.conversation = room.dataset.ccRoom;
+        state.project = room.dataset.project;
+        state.environment = room.dataset.environment;
+        state.view = "discussion";
+        persistSelection();
+        rerender();
+        return;
+      }
+      const tab = event.target.closest("[data-cc-view], [data-cc-open-joins]");
+      if (tab) {
+        const selected = tab.dataset.ccView || "agents";
+        rememberChat();
+        state.view = selected;
+        rerender().then((committed) => {
+          const next = app.querySelector(".collaboration");
+          const focused = document.activeElement;
+          if (committed && state.view === selected && next && (focused === document.body || focused === next || focused === app)) {
+            next.querySelector('.cc-tabs [aria-pressed="true"]')?.focus({ preventScroll: true });
+          }
+        });
+        return;
+      }
+      const target = event.target.closest("[data-cc-action]");
+      if (target) {
+        if (target.dataset.ccAction === "close-drawer") {
+          closeDrawer();
+          return;
+        }
+        const menu = target.closest(".cc-room-menu");
+        if (menu) menu.open = false;
+        run(() => act(target.dataset.ccAction, target));
+      }
+    });
+    root.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!live()) return;
+      if (event.target.checkValidity()) run(() => submit(event.target));
+    });
+    const remember = (event) => {
+      if (!live()) return;
+      coordination.change(event);
+      const form = event.target.form;
+      if (form?.id === "cc-join-slot" && event.target.name) state.joinDraft[event.target.name] = event.target.value;
+      if (form?.id === "cc-command") chat().draft = event.target.value;
+      if (form?.id === "cc-plan" && event.target.name) state.draft[event.target.name] = event.target.value;
+    };
+    root.addEventListener("input", remember);
+    root.addEventListener("change", remember);
+    root.addEventListener("compositionstart", () => { if (live()) state.composing = true; });
+    root.addEventListener("compositionend", () => { if (live()) state.composing = false; });
+    root.addEventListener("keydown", (event) => {
+      if (!live() || event.target.id !== "cc-message-input") return;
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !state.composing && event.keyCode !== 229
+          && !matchMedia("(pointer: coarse), (max-width: 720px)").matches) {
+        event.preventDefault();
+        event.target.form.requestSubmit();
+      }
+    });
+    const dialog = root.querySelector("#cc-drawer");
+    dialog?.addEventListener("close", () => {
+      if (!live() || dialog.open) return;
+      const epoch = ++state.drawerEpoch;
+      const target = state.drawerFocus;
+      const focused = document.activeElement;
+      // Native close may already have restored focus. Never override a newer user choice.
+      if (focused !== document.body && focused !== root && focused !== root.parentElement && focused !== target && !dialog.contains(focused)) return;
+      requestAnimationFrame(() => {
+        if (live() && epoch === state.drawerEpoch && !dialog.open && target?.isConnected && document.activeElement === focused) {
+          target.focus({ preventScroll: true });
+        }
+      });
+    });
+    dialog?.addEventListener("cancel", () => { if (live()) state.drawerEpoch += 1; });
+    const feed = root.querySelector(".cc-feed");
+    const area = root.querySelector("#cc-message-input");
+    if (feed) {
+      const c = chat();
+      for (const node of feed.querySelectorAll("[data-message-id]")) {
+        const m = messageById(node.dataset.messageId);
+        if (m) node._ccMarkup = messageMarkup(m);
+      }
+      feed.scrollTop = c.scroll ?? feed.scrollHeight;
+      feed.addEventListener("scroll", () => {
+        c.scroll = feed.scrollTop;
+        if (feed.scrollHeight - feed.scrollTop - feed.clientHeight < 70) {
+          c.unread = 0;
+          root.querySelector(".cc-new-messages").hidden = true;
+          markVisibleRead();
+        }
+      });
+      if (c.focused && area && !area.disabled) {
+        area.focus({ preventScroll: true });
+        if (c.selection) area.setSelectionRange(...c.selection);
+      }
+      markVisibleRead();
+    }
+    bindDetails();
+    expireInvitations(root);
+    if (state.reveal) {
+      root.querySelector(state.reveal)?.scrollIntoView({ block: "start" });
+      state.reveal = "";
+    }
+    if (state.snapshot?.room && state.snapshot.capabilities?.plain_messages) {
+      const generation = state.generation;
+      const poll = async () => {
+        if (generation !== state.generation || !onPage() || state.polling || state.busy || document.hidden) return;
+        state.polling = true;
+        try {
+          await refreshChat();
+        } catch (error) {
+          if (error.status === 401 && onPage()) { // signed out meanwhile: back to the sign-in page
+            panel.session.authenticated = false;
+            render();
+            return;
+          }
+          if (!error.stale && generation === state.generation) setFeedback(`消息刷新暂时失败，草稿已保留。${error.message}`, true);
+        } finally {
+          if (generation === state.generation) state.polling = false;
+        }
+      };
+      clearInterval(panel.poll);
+      panel.poll = setInterval(poll, 5000);
+    }
+  }
+
+  function commit(markup, keepOpen = []) {
+    app.innerHTML = markup;
+    for (const details of app.querySelectorAll("details[data-cc-keep]")) {
+      if (keepOpen.includes(details.dataset.ccKeep)) details.open = true;
+    }
+    bind();
+  }
+
+  function recoveryPage(error) {
+    app.innerHTML = introPage(`<section class="cc-card cc-intro"><div class="alert error">${E(error.message)}</div>
+      <div class="cc-actions"><button type="button" class="primary" data-cc-recover="retry">重新读取</button>
+      <button type="button" data-cc-recover="reset">回到第一个项目的默认房间</button></div></section>`);
+    app.querySelector(".collaboration").addEventListener("click", (event) => {
+      const choice = event.target.closest("[data-cc-recover]")?.dataset.ccRecover;
+      if (!choice || !onPage()) return;
+      if (choice === "reset") {
+        state.project = "";
+        state.conversation = "";
+        state.environment = "production";
+        state.view = "discussion";
+        resetScope();
+        persistSelection();
+      }
+      rerender();
+    });
+  }
+
+  // Re-render inside the page (no navigation): returns whether a fresh page was committed.
+  async function rerender() {
+    if (!onPage()) return false;
+    // Sections the user opened stay open on the fresh page (e.g. the agent bindings after registering one).
+    const keepOpen = [...app.querySelectorAll("details[data-cc-keep][open]")].map((node) => node.dataset.ccKeep);
+    detach();
+    const seq = ++state.renderSeq;
+    try {
+      const markup = await html();
+      if (seq !== state.renderSeq || !onPage() || !markup) return false;
+      commit(markup, keepOpen);
+      return true;
+    } catch (error) {
+      if (error.stale || seq !== state.renderSeq || !onPage()) return false;
+      if (error.status === 401) {
+        panel.session.authenticated = false;
+        render();
+        return false;
+      }
+      recoveryPage(error);
+      return false;
+    }
+  }
+
+  // The #/collaboration route (app.js render() bumped panel.view just before). #/collaboration/<project> opens a project.
+  async function view(arg) {
+    state.pageView = panel.view;
+    panel.leave = leave;
+    if (arg) state.pendingProject = decodeURIComponent(arg);
+    detach();
+    const seq = ++state.renderSeq;
+    let markup;
+    try {
+      markup = await html();
+    } catch (error) {
+      if (error.stale || error.status === 401 || seq !== state.renderSeq || !onPage()) throw error;
+      recoveryPage(error);
+      return;
+    }
+    if (seq !== state.renderSeq || !onPage() || !markup) return;
+    commit(markup);
+  }
+
+  // app.js calls this when the route changes (navigation, sign-out).
+  function leave() {
+    detach();
+    if (!panel.session?.authenticated) clear();
+  }
+
+  return { view, leave, clear };
+})(state);
