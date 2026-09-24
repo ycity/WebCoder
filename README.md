@@ -208,6 +208,35 @@ Stop-ScheduledTask -TaskName 'WebCoder Agent' -ErrorAction SilentlyContinue; Unr
 - 只限定了部分项目的令牌看不到用户目录下的 skills，那些在它的项目之外。
 - 局限：skill 里要求在本机运行的程序（比如 `lark-cli`、`meegle`），ChatGPT 通过这些工具跑不了，它会照实说明，不会假装已经执行。
 
+## 协作中心（dot / Work 聊天协作）
+
+默认关闭的多助手协作功能，移植自 [CodePier](https://github.com/cyeinfpro/codepier)（MIT 许可）的协作中心。它让你自己的几个助手聊天共用一个讨论室，并按用途分工：
+
+- **dot 聊天**负责协调：接收结果汇总任务，以及分析结果、异常变化的通知；
+- **Work 聊天**（ChatGPT 网页的 Work，或桌面端选择 Cloud 的 Work）负责只读分析：领取异常分析等任务。
+
+主要能力：
+
+| 部分 | 说明 |
+| --- | --- |
+| 讨论室 | 单项目或多项目房间，消息、回复、话题、搜索、阅读位置；`@` 只提醒你在选择器里明确选中的位置，普通文字里的 `@` 不算 |
+| 接入 dot / Work | 面板「智能体与订阅」为每个聊天创建一个位置，生成 `WAJ-XXXX-XXXX-XXXX-XXXX` 加入码；把加入指令发到目标聊天 → 聊天用现有的 WebCoder 授权调用 `collaboration_join` 登记 → 宿主按返回的 `subscription_requests` 建立 MCP Events 订阅（Work 2 个、dot 4 个）→ 面板发测试事件 → 你在聊天里看到后确认收件。加入码只定位位置，不授予任何权限 |
+| 只读任务 | 消息可转为任务；助手通过 MCP 提出的指令要你在面板批准。任务有租约（15 分钟）、fencing、幂等键和预算（每个项目最多 2 个未完成、每小时 6 个、每天 20 个），过期租约的迟到结果单独存证；分析完成后可明确交给另一个 dot 汇总一次。领取任务的连接必须是只读的 |
+| 目标协作 | 你在面板批准目标（项目、参与的连接、能力上限 read / write / execute、期限和预算）后，协调连接可拆分工作项、指派、交接、复核。工作项的执行步骤通过 `collaboration_work_execute` 调用该项目的 WebCoder 工具（`read_file`、`edit_file`、`git_*`、`cli_run` 等，execute 即 `cli_run`），每一步都有真实的操作编号和状态，并照常记入审计日志 |
+| 监控 | 登记固定的 HTTP GET 探针，计划（阈值、窗口、样本量）的每个版本不可更改，要你单独批准后才开始采集；异常和恢复由探针判定，模型的结论不能把异常标为已恢复 |
+| MCP Events | 开启后 `/mcp` 同时支持 2026-07-28 新协议（`server/discover`、`events/list`、`events/subscribe`、`events/unsubscribe`）；回调使用 Standard Webhooks 签名、challenge 验证、加密存储，拒绝私网地址和重定向，按订阅顺序投递并支持游标恢复 |
+
+开启方式（四个开关默认都是 `false`，后三个需要先开主开关）：
+
+```bash
+WEBCODER_COLLABORATION_ENABLED=true      # 主开关：协作中心面板和 collaboration_* 工具
+WEBCODER_MCP_EVENTS_ENABLED=true         # MCP Events：dot / Work 聊天接收通知需要
+WEBCODER_MONITOR_COLLECTOR_ENABLED=true  # 采集已批准监控计划的 HTTP 探针
+WEBCODER_ANALYSIS_DISPATCH_ENABLED=true  # 监控异常自动建分析任务，并投递任务通知
+```
+
+只开主开关就能试用讨论室和手动领取任务。需要知道的边界：同一个授权下的多个聊天，服务端无法区分，聊天名称和加入码都不是身份证明；订阅有效不代表模型在线，回调返回 2xx 只说明对方接收了；宿主（ChatGPT 的 dot / Work）能否订阅、何时处理事件，要在真实环境验证（CodePier 自己也还没完成真实 dot / Work 路由的验收）；订阅的回调地址和签名材料用 `master.key` 加密存储，备份时数据库和 `master.key` 要一起备份。详细说明见 [docs/COLLABORATION.md](docs/COLLABORATION.md)。
+
 ## 用 ChatGPT 网页版修改本地文件
 
 先在 ChatGPT 里打开开发者模式：**设置 → 安全与登录（Security and login）→ 开发者模式（Developer mode）**（部分账号在「设置 → Plugins」页面底部；企业 / 教育工作区需要管理员授权）。然后二选一：
@@ -346,6 +375,10 @@ Hub 环境变量：
 | `WEBCODER_AGENT_TIMEOUT` | `45` | 等待 Agent 应答的秒数 |
 | `WEBCODER_MAX_TRANSFER_MB` | `16` | 跨设备复制上限（源和目标设备的 Agent 还各有 `max_write_mb` 上限，默认也是 16：调高时两端一起调，以较小的为准） |
 | `WEBCODER_TRUSTED_PROXIES` | `127.0.0.1` | 信任其 `X-Forwarded-*` 的反向代理 |
+| `WEBCODER_COLLABORATION_ENABLED` | `false` | 协作中心主开关（dot / Work 聊天、讨论室、只读任务、目标协作） |
+| `WEBCODER_MCP_EVENTS_ENABLED` | `false` | MCP Events（2026-07-28 协议、事件订阅、webhook 投递），需要主开关 |
+| `WEBCODER_MONITOR_COLLECTOR_ENABLED` | `false` | 采集已批准监控计划的 HTTP 探针，需要主开关 |
+| `WEBCODER_ANALYSIS_DISPATCH_ENABLED` | `false` | 监控异常自动建分析任务并投递任务通知，需要主开关 |
 
 Agent 配置（`~/.webcoder-agent/config.json`）：`hub_url`、`allowed_roots`、`read_only`、`proxy`（`system` / `none` / 代理地址）、`deny`（自定义拒绝列表，`null` 为内置列表）、`max_write_mb`、`backup_keep`、`mobile`（手机控制开关）、`ssh_hosts`（允许连接的服务器）、`ssh_command`（ssh 客户端路径，留空自动查找）、`git_command`、`skills` 与 `skill_dirs`（共享 skills）、`commands`（允许运行的命令行工具）与 `command_paths`（不在 PATH 上的程序路径）。
 
@@ -356,7 +389,7 @@ python -m venv .venv && .venv/Scripts/python -m pip install -e ".[hub,dev]"    #
 python -m pytest -q
 ```
 
-测试（277 个）使用真实的 Hub（uvicorn）和真实的 Agent（WebSocket），覆盖：路径与权限边界、编辑语义、加密通道、MCP 协议细节、OAuth 全流程（按 ChatGPT 的方式：动态注册、空 scope、以域名作 resource、`iss`、`_meta` 重新授权；以及 Codex 的回环回调与刷新令牌轮换）、多用户隔离（设备 / 项目 / 令牌 / OAuth / 审计）、邀请与重置链接、停用与删除用户、单用户数据库自动迁移、一键安装命令（在真实的 PowerShell 和 bash 里验证含空格、引号和中文的文件夹路径原样传给安装脚本）、运行中的 Agent 热加载文件夹与重新配对、删除设备后 Agent 自动退役（在线 / 离线、伪造的删除通知无效、只清理自己的自启项）、单实例锁、手机控制（用假的 adb / hdc 验证参数转义、权限、项目边界和 MCP 工具）、SSH（用假的 ssh 验证主机白名单、选项注入防护、非交互选项、超时、上传不覆盖、下载进项目、按主机选电脑和审计）、git（用真实仓库验证钩子不执行、参数不能变成选项、机密不进 diff / 暂存 / clean、丢弃改动前的快照、推送到本地裸仓库、冲突处理和只读设备）、在对话里显示图片（用真实浏览器验证 MCP Apps 组件的握手和渲染）、skills（只读、只开放 skills 文件夹、开关与令牌范围）、本机命令行工具（禁止清单、参数原样传递、用真实 node 验证 npm 包装脚本不经过 cmd.exe、GBK 输出解码、授权与审计）、跨设备复制、stdio 桥接（含 `--token-file`）、插件包（用官方 Agent Plugins Schema 校验）、官方 MCP Python SDK 客户端、以及用 Playwright 驱动的面板 UI 冒烟测试（需要本机有 Edge 或 Chrome，否则自动跳过）。
+测试（485 个）使用真实的 Hub（uvicorn）和真实的 Agent（WebSocket），覆盖：路径与权限边界、编辑语义、加密通道、MCP 协议细节、OAuth 全流程（按 ChatGPT 的方式：动态注册、空 scope、以域名作 resource、`iss`、`_meta` 重新授权；以及 Codex 的回环回调与刷新令牌轮换）、多用户隔离（设备 / 项目 / 令牌 / OAuth / 审计）、邀请与重置链接、停用与删除用户、单用户数据库自动迁移、一键安装命令（在真实的 PowerShell 和 bash 里验证含空格、引号和中文的文件夹路径原样传给安装脚本）、运行中的 Agent 热加载文件夹与重新配对、删除设备后 Agent 自动退役（在线 / 离线、伪造的删除通知无效、只清理自己的自启项）、单实例锁、手机控制（用假的 adb / hdc 验证参数转义、权限、项目边界和 MCP 工具）、SSH（用假的 ssh 验证主机白名单、选项注入防护、非交互选项、超时、上传不覆盖、下载进项目、按主机选电脑和审计）、git（用真实仓库验证钩子不执行、参数不能变成选项、机密不进 diff / 暂存 / clean、丢弃改动前的快照、推送到本地裸仓库、冲突处理和只读设备）、在对话里显示图片（用真实浏览器验证 MCP Apps 组件的握手和渲染）、skills（只读、只开放 skills 文件夹、开关与令牌范围）、本机命令行工具（禁止清单、参数原样传递、用真实 node 验证 npm 包装脚本不经过 cmd.exe、GBK 输出解码、授权与审计）、跨设备复制、stdio 桥接（含 `--token-file`）、插件包（用官方 Agent Plugins Schema 校验）、官方 MCP Python SDK 客户端、协作中心（移植自 CodePier 的服务、事件投递、加入、聊天室、目标与监控测试；MCP Events 2026-07-28 协议契约；dot 聊天「加入码 → 四个订阅 → 测试事件真实投递 → 确认收件」的端到端流程；通过真实 Agent 执行目标步骤；协作中心页面的 Playwright 测试）、以及用 Playwright 驱动的面板 UI 冒烟测试（需要本机有 Edge 或 Chrome，否则自动跳过）。
 
 Windows 一键安装脚本已在 Windows 11 + Windows PowerShell 5.1 上实跑：全新安装、重复运行（升级 + 重新配对）、计划任务开机自启与停止、删除设备后自动移除计划任务、彻底卸载命令、安装失败时恢复原 Agent。Linux 脚本在 Debian 12 上对正式 Hub 实跑过（不含自启部分）；macOS 脚本只做了语法和参数传递测试。
 
@@ -369,9 +402,11 @@ webcoder/
 ├── common/     # 共享：错误类型、加密通道、工具函数
 ├── agent/      # 设备端：文件操作沙箱（fileops.py）、连接循环、命令行
 ├── hub/        # 中心服务：MCP、OAuth、面板 API、Agent 中继、插件包生成、静态面板
+│   └── collaboration/  # 协作中心：dot / Work 聊天、讨论室、任务、目标、监控、MCP Events（移植自 CodePier）
 └── bridge/     # stdio ↔ HTTP 桥接（Secure MCP Tunnel 用，仅标准库）
 tests/          # pytest：单元、端到端、SDK 兼容、面板 UI
 deploy/         # HTTPS（Caddy）部署文件
+docs/           # 专题文档（协作中心）
 ```
 
 ## 已知限制
