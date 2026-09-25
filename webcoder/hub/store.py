@@ -69,6 +69,12 @@ CREATE TABLE IF NOT EXISTS links (
     id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('invite', 'reset')),
     user_id TEXT REFERENCES users(id) ON DELETE CASCADE, note TEXT NOT NULL DEFAULT '', created_by TEXT,
     created REAL NOT NULL, expires REAL NOT NULL, used REAL);
+CREATE TABLE IF NOT EXISTS browser_links (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL,
+    token_hash TEXT UNIQUE NOT NULL, created REAL NOT NULL, last_seen REAL, revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS browser_codes (
+    code_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_id TEXT, expires REAL NOT NULL);
 """
 
 INDEXES = """
@@ -77,6 +83,7 @@ CREATE INDEX IF NOT EXISTS devices_user ON devices(user_id);
 CREATE INDEX IF NOT EXISTS projects_user ON projects(user_id);
 CREATE INDEX IF NOT EXISTS grants_user ON grants(user_id);
 CREATE INDEX IF NOT EXISTS audit_user ON audit(user_id, id);
+CREATE INDEX IF NOT EXISTS browser_links_user ON browser_links(user_id);
 """
 
 

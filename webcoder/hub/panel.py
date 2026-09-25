@@ -576,6 +576,7 @@ def make_panel_router(rt) -> APIRouter:
     async def disconnect_user_devices(user_id: str) -> None:
         for row in store.all("SELECT id FROM devices WHERE user_id=?", (user_id,)):
             await rt.agents.disconnect(row["id"], CLOSE_FORBIDDEN, "user disabled")
+        await rt.browser.drop_user(user_id)  # its linked browsers too, and its webcoder tasks end
 
     @router.patch("/api/users/{user_id}")
     async def update_user(user_id: str, request: Request, body: UserPatch):
@@ -623,10 +624,13 @@ def make_panel_router(rt) -> APIRouter:
             db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
             db.execute("DELETE FROM oauth_codes WHERE user_id=?", (user_id,))
             db.execute("DELETE FROM links WHERE user_id=?", (user_id,))
+            db.execute("DELETE FROM browser_links WHERE user_id=?", (user_id,))
+            db.execute("DELETE FROM browser_codes WHERE user_id=?", (user_id,))
             db.execute("DELETE FROM audit WHERE user_id=?", (user_id,))
             db.execute("DELETE FROM users WHERE id=?", (user_id,))
         for device in devices:
             await rt.agents.retire(device["id"])
+        await rt.browser.drop_user(user_id)
         audit(admin, "user.deleted", target["username"])
         return {"ok": True}
 

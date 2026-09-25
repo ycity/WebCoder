@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from webcoder import VERSION
 from webcoder.hub.auth import ApiError
+from webcoder.hub.browser import make_cli_router
 from webcoder.hub.collaboration.api import make_router as make_collaboration_router
 from webcoder.hub.collaboration.errors import DevError
 from webcoder.hub.config import Settings
@@ -171,11 +172,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(make_mcp_router(rt))
     app.include_router(make_panel_router(rt))
     app.include_router(make_collaboration_router(rt))
+    app.include_router(make_cli_router(rt))
     app.include_router(make_download_router())
 
     @app.websocket("/agent/ws")
     async def agent_socket(websocket: WebSocket):
         await rt.agents.serve(websocket)
+
+    @app.websocket("/browser/ws")
+    async def browser_socket(websocket: WebSocket):
+        await rt.browser.serve(websocket)
 
     @app.get("/healthz")
     async def healthz():

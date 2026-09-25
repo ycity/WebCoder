@@ -52,6 +52,8 @@ class Runtime:
         self.agents = AgentRegistry(self)
         self.oauth = OAuthService(self)
         self.limiter = RateLimiter()
+        from webcoder.hub.browser import BrowserRelay
+        self.browser = BrowserRelay(self)  # webcoder: tasks from the command line, typed into ChatGPT by the extension
         self._audit_writes = 0
         from webcoder.hub.collaboration.lifecycle import install
         install(self)  # self.collaboration: rooms, dot / Work chats, tasks, MCP Events (off unless switched on)

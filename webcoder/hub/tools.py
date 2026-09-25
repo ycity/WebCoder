@@ -730,6 +730,10 @@ async def execute(runtime, principal: Principal, tool: Tool, arguments) -> tuple
         status = "INTERNAL_ERROR"
         return ToolResult(f"Error INTERNAL_ERROR: {type(exc).__name__}: {exc}"), True
     finally:
-        runtime.audit(principal.actor, tool.name, ctx.audit_target,
-                      ctx.audit_status if status == "ok" and ctx.audit_status else status,
-                      duration_ms=int((time.monotonic() - started) * 1000), user_id=principal.user_id)
+        final = ctx.audit_status if status == "ok" and ctx.audit_status else status
+        duration = int((time.monotonic() - started) * 1000)
+        runtime.audit(principal.actor, tool.name, ctx.audit_target, final, duration_ms=duration,
+                      user_id=principal.user_id)
+        browser = getattr(runtime, "browser", None)
+        if browser is not None:  # a webcoder task in this project shows the call on the command line
+            browser.tool_called(principal, tool.name, ctx.audit_target, final, duration)

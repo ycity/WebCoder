@@ -27,16 +27,17 @@ dependencies = ["websockets>=15", "cryptography>=42", "regex>=2024.4"]
 [project.scripts]
 webcoder-agent = "webcoder.agent.__main__:main"
 webcoder-bridge = "webcoder.bridge.__main__:main"
+webcoder = "webcoder.cli.__main__:main"
 
 [tool.setuptools]
-packages = ["webcoder", "webcoder.common", "webcoder.agent", "webcoder.bridge"]
+packages = ["webcoder", "webcoder.common", "webcoder.agent", "webcoder.bridge", "webcoder.cli"]
 """
 
 
 def agent_sources() -> dict[str, bytes]:
     package = Path(webcoder.__file__).resolve().parent
     files = {"webcoder/__init__.py": (package / "__init__.py").read_bytes()}
-    for sub in ("common", "agent", "bridge"):
+    for sub in ("common", "agent", "bridge", "cli"):
         for source in sorted((package / sub).glob("*.py")):
             files[f"webcoder/{sub}/{source.name}"] = source.read_bytes()
     return files
@@ -64,6 +65,17 @@ def build_agent_zip() -> bytes:
 
 
 INSTALLERS = Path(__file__).resolve().parent / "installers"
+EXTENSION = Path(__file__).resolve().parent / "extension"
+
+
+def build_extension_zip() -> bytes:
+    """The WebCoder browser extension, as a folder to unzip and load unpacked (Chrome / Edge)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for source in sorted(EXTENSION.rglob("*")):
+            if source.is_file():
+                archive.writestr("webcoder-extension/" + source.relative_to(EXTENSION).as_posix(), source.read_bytes())
+    return buffer.getvalue()
 
 
 def make_download_router() -> APIRouter:
@@ -76,6 +88,13 @@ def make_download_router() -> APIRouter:
             cache["zip"] = build_agent_zip()
         return Response(cache["zip"], media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="webcoder-agent-{VERSION}.zip"'})
+
+    @router.get("/downloads/webcoder-extension.zip")
+    async def extension_zip():
+        if "extension" not in cache:
+            cache["extension"] = build_extension_zip()
+        return Response(cache["extension"], media_type="application/zip",
+                        headers={"Content-Disposition": 'attachment; filename="webcoder-extension.zip"'})
 
     # Explicit UTF-8: Windows PowerShell 5.1's Invoke-RestMethod would otherwise misread the Chinese messages.
     @router.get("/downloads/install-agent.ps1")

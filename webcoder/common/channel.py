@@ -106,6 +106,29 @@ def upgrade_header(secret: bytes, device_id: str, stamp: int, nonce: bytes) -> s
     return f"{device_id} {stamp} {b64e(nonce)} {b64e(upgrade_proof(secret, device_id, stamp, nonce))}"
 
 
+SIGNATURE_HEADER = "X-WebCoder-Signature"  # "<device id> <unix time> <nonce> <request_proof>" on CLI requests
+
+
+def request_proof(secret: bytes, device_id: str, stamp: int, nonce: bytes, method: str, target: str,
+                  body: bytes) -> bytes:
+    """Signs one HTTP request of the `webcoder` command line with the device secret: method, path (with its
+    query) and body, so a signed request cannot be replayed elsewhere or altered on the way."""
+    message = b"|".join([_LABEL, b"request", device_id.encode("utf-8"), str(stamp).encode("ascii"), nonce,
+                         method.upper().encode("ascii"), target.encode("utf-8"),
+                         hashlib.sha256(body).hexdigest().encode("ascii")])
+    return hmac.new(secret, message, hashlib.sha256).digest()
+
+
+def request_signature(secret: bytes, device_id: str, method: str, target: str, body: bytes,
+                      stamp: int | None = None, nonce: bytes | None = None) -> str:
+    import time
+
+    stamp = int(time.time()) if stamp is None else stamp
+    nonce = new_nonce() if nonce is None else nonce
+    proof = request_proof(secret, device_id, stamp, nonce, method, target, body)
+    return f"{device_id} {stamp} {b64e(nonce)} {b64e(proof)}"
+
+
 def deleted_proof(secret: bytes, device_id: str, hub_nonce: bytes, agent_nonce: bytes) -> bytes:
     """Proves a "this device was deleted" answer comes from the hub that knew the device secret."""
     return _proof(secret, b"device-deleted", device_id, hub_nonce, agent_nonce)
