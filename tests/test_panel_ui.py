@@ -1,4 +1,4 @@
-"""Headless browser smoke test of the web panel (skipped without Playwright + Edge/Chromium).
+"""Headless browser smoke test of the web panel (requires Playwright's dedicated headless shell).
 
 Set WEBCODER_SCREENSHOTS=<folder> to keep screenshots of every page.
 """
@@ -12,23 +12,11 @@ import pytest
 from tests.conftest import ADMIN_PASSWORD
 from webcoder.common.crypto import pkce_challenge
 
-sync_api = pytest.importorskip("playwright.sync_api")
-
 
 @pytest.fixture
-def page(hub):
+def page(hub, ui_browser):
     shots = os.environ.get("WEBCODER_SCREENSHOTS")
-    with sync_api.sync_playwright() as playwright:
-        browser = None
-        for kwargs in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
-            try:
-                browser = playwright.chromium.launch(headless=True, **kwargs)
-                break
-            except Exception:  # noqa: BLE001 - try the next available browser
-                continue
-        if browser is None:
-            pytest.skip("no Chromium-based browser available for Playwright")
-        context = browser.new_context(viewport={"width": 1280, "height": 900}, locale="zh-CN")
+    with ui_browser.new_context(viewport={"width": 1280, "height": 900}, locale="zh-CN") as context:
         tab = context.new_page()
         tab.problems = []
         tab.on("pageerror", lambda exc: tab.problems.append(f"pageerror: {exc}"))
@@ -41,7 +29,6 @@ def page(hub):
 
         tab.shot = shot
         yield tab
-        browser.close()
 
 
 def problems(page, *provoked):

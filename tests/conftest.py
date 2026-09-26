@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tests.browser_support import launch_test_browser  # noqa: E402
 from tests.collaboration_support import collab  # noqa: E402,F401 - fixture for the collaboration tests
 from webcoder.agent.__main__ import pair_device  # noqa: E402
 from webcoder.agent.client import run_agent  # noqa: E402
@@ -28,12 +29,19 @@ from webcoder.hub.config import Settings  # noqa: E402
 
 ADMIN_PASSWORD = "correct-horse-battery"
 SHA_RE = re.compile(r"sha256=([0-9a-f]{64})")
+# Browser-restricted ports above 1023 (including X11's 6000); low ports are excluded altogether. A free port can
+# still be forbidden to navigate to, and Windows sometimes allocates one for bind(..., 0).
+BROWSER_BLOCKED_PORTS = {1719, 1720, 1723, 2049, 3659, 4045, 5060, 5061, 6000, 6566,
+                         6665, 6666, 6667, 6668, 6669, 6697, 10080}
 
 
 def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    while True:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        if port >= 1024 and port not in BROWSER_BLOCKED_PORTS:
+            return port
 
 
 def sha_of(text: str) -> str:
@@ -163,6 +171,20 @@ class AgentThread:
             with contextlib.suppress(RuntimeError):  # the loop may finish on its own meanwhile (agent retired)
                 self.loop.call_soon_threadsafe(self.stop_event.set)
         self.thread.join(15)
+
+
+@pytest.fixture(scope="module")
+def ui_browser():
+    """One dedicated headless shell per test module; each test gets its own context and page. Never use the
+    person's installed Edge/Chrome, even when the Playwright browser is missing. Not shared by the whole run:
+    Playwright's sync API keeps an event loop running on the main thread, which breaks later asyncio.run()."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    with sync_api.sync_playwright() as playwright:
+        browser = launch_test_browser(playwright)
+        try:
+            yield browser
+        finally:
+            browser.close()
 
 
 @pytest.fixture

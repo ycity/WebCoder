@@ -1,4 +1,4 @@
-"""The extension's content script against a stand-in for chatgpt.com (headless Edge / Chromium via Playwright).
+"""The extension's content script against a stand-in for chatgpt.com (Playwright's dedicated headless shell).
 
 The stand-in has what the script relies on: a ProseMirror-like composer in form[data-chatgpt-composer], an "@"
 menu that turns the app into a chip, turns as li[data-message-role], a stop button and data-message-streaming
@@ -9,8 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-sync_api = pytest.importorskip("playwright.sync_api")
 
 CONTENT = Path(__file__).resolve().parents[1] / "webcoder" / "hub" / "extension" / "content.js"
 
@@ -135,18 +133,9 @@ function answer() {
 
 
 @pytest.fixture
-def page():
-    with sync_api.sync_playwright() as playwright:
-        browser = None
-        for kwargs in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
-            try:
-                browser = playwright.chromium.launch(headless=True, **kwargs)
-                break
-            except Exception:  # noqa: BLE001 - try the next available browser
-                continue
-        if browser is None:
-            pytest.skip("no Chromium-based browser available for Playwright")
-        tab = browser.new_page()
+def page(ui_browser):
+    with ui_browser.new_context() as context:
+        tab = context.new_page()
         tab.problems = []
         tab.on("pageerror", lambda exc: tab.problems.append(str(exc)))
         tab.set_content(PAGE)
@@ -154,7 +143,6 @@ def page():
         tab.add_script_tag(path=str(CONTENT))
         yield tab
         assert tab.problems == []
-        browser.close()
 
 
 def call(page, message: dict) -> dict:

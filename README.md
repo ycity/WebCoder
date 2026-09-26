@@ -434,10 +434,15 @@ Agent 配置（`~/.webcoder-agent/config.json`）：`hub_url`、`allowed_roots`�
 
 ```bash
 python -m venv .venv && .venv/Scripts/python -m pip install -e ".[hub,dev]"    # Linux/macOS 用 .venv/bin/python
-python -m pytest -q
+.venv/Scripts/python -m playwright install chromium-headless-shell
+.venv/Scripts/python -m pytest -q
 ```
 
-测试（502 个）使用真实的 Hub（uvicorn）和真实的 Agent（WebSocket），覆盖：webcoder（设备签名：重放、篡改、过期、停用设备；文件夹自动成为项目；扩展的一次性连接码、令牌、撤销、网页来源被拒；任务中继、工具调用回传、取消、扩展断线与重启；命令行从提交到输出的完整流程；扩展的页面脚本在仿 chatgpt.com 页面上用无头 Edge 验证 @应用、自动批准与「记住」、只点自己的确认按钮、回复还原成 Markdown）、路径与权限边界、编辑语义、加密通道、MCP 协议细节、OAuth 全流程（按 ChatGPT 的方式：动态注册、空 scope、以域名作 resource、`iss`、`_meta` 重新授权；以及 Codex 的回环回调与刷新令牌轮换）、多用户隔离（设备 / 项目 / 令牌 / OAuth / 审计）、邀请与重置链接、停用与删除用户、单用户数据库自动迁移、一键安装命令（在真实的 PowerShell 和 bash 里验证含空格、引号和中文的文件夹路径原样传给安装脚本）、运行中的 Agent 热加载文件夹与重新配对、删除设备后 Agent 自动退役（在线 / 离线、伪造的删除通知无效、只清理自己的自启项）、单实例锁、手机控制（用假的 adb / hdc 验证参数转义、权限、项目边界和 MCP 工具）、SSH（用假的 ssh 验证主机白名单、选项注入防护、非交互选项、超时、上传不覆盖、下载进项目、按主机选电脑和审计）、git（用真实仓库验证钩子不执行、参数不能变成选项、机密不进 diff / 暂存 / clean、丢弃改动前的快照、推送到本地裸仓库、冲突处理和只读设备）、在对话里显示图片（用真实浏览器验证 MCP Apps 组件的握手和渲染）、skills（只读、只开放 skills 文件夹、开关与令牌范围）、本机命令行工具（禁止清单、参数原样传递、用真实 node 验证 npm 包装脚本不经过 cmd.exe、GBK 输出解码、授权与审计）、跨设备复制、stdio 桥接（含 `--token-file`）、插件包（用官方 Agent Plugins Schema 校验）、官方 MCP Python SDK 客户端、协作中心（移植自 CodePier 的服务、事件投递、加入、聊天室、目标与监控测试；MCP Events 2026-07-28 协议契约；dot 聊天「加入码 → 四个订阅 → 测试事件真实投递 → 确认收件」的端到端流程；通过真实 Agent 执行目标步骤；协作中心页面的 Playwright 测试）、以及用 Playwright 驱动的面板 UI 冒烟测试（需要本机有 Edge 或 Chrome，否则自动跳过）。
+页面测试统一使用 Playwright 自带的 **Chromium headless shell**，每个测试文件共用一个浏览器进程、文件结束时关闭，每个测试使用独立上下文；不使用系统 Edge/Chrome，也不在缺少测试浏览器时回退到它们。未安装 Playwright 或 headless shell 时，相关页面测试会跳过并给出安装提示；其他启动错误照常报错。Linux CI 可用 `python -m playwright install --with-deps --only-shell chromium` 安装浏览器及系统依赖。
+
+原因：Windows 上系统浏览器的密码管理器可能通过空密码尝试验证当前 Windows 账户；反复用新配置提交密码表单，会产生登录失败，达到账户锁定阈值。测试网页登录密码只用于本地测试 Hub，这种系统登录尝试来自浏览器自身。专用 headless shell 避开桌面密码管理器；这里不需要修改 Windows 锁定策略。
+
+测试（502 个）使用真实的 Hub（uvicorn）和真实的 Agent（WebSocket），覆盖：webcoder（设备签名：重放、篡改、过期、停用设备；文件夹自动成为项目；扩展的一次性连接码、令牌、撤销、网页来源被拒；任务中继、工具调用回传、取消、扩展断线与重启；命令行从提交到输出的完整流程；扩展的页面脚本在仿 chatgpt.com 页面上用 Chromium headless shell 验证 @应用、自动批准与「记住」、只点自己的确认按钮、回复还原成 Markdown）、路径与权限边界、编辑语义、加密通道、MCP 协议细节、OAuth 全流程（按 ChatGPT 的方式：动态注册、空 scope、以域名作 resource、`iss`、`_meta` 重新授权；以及 Codex 的回环回调与刷新令牌轮换）、多用户隔离（设备 / 项目 / 令牌 / OAuth / 审计）、邀请与重置链接、停用与删除用户、单用户数据库自动迁移、一键安装命令（在真实的 PowerShell 和 bash 里验证含空格、引号和中文的文件夹路径原样传给安装脚本）、运行中的 Agent 热加载文件夹与重新配对、删除设备后 Agent 自动退役（在线 / 离线、伪造的删除通知无效、只清理自己的自启项）、单实例锁、手机控制（用假的 adb / hdc 验证参数转义、权限、项目边界和 MCP 工具）、SSH（用假的 ssh 验证主机白名单、选项注入防护、非交互选项、超时、上传不覆盖、下载进项目、按主机选电脑和审计）、git（用真实仓库验证钩子不执行、参数不能变成选项、机密不进 diff / 暂存 / clean、丢弃改动前的快照、推送到本地裸仓库、冲突处理和只读设备）、在对话里显示图片（用真实浏览器验证 MCP Apps 组件的握手和渲染）、skills（只读、只开放 skills 文件夹、开关与令牌范围）、本机命令行工具（禁止清单、参数原样传递、用真实 node 验证 npm 包装脚本不经过 cmd.exe、GBK 输出解码、授权与审计）、跨设备复制、stdio 桥接（含 `--token-file`）、插件包（用官方 Agent Plugins Schema 校验）、官方 MCP Python SDK 客户端、协作中心（移植自 CodePier 的服务、事件投递、加入、聊天室、目标与监控测试；MCP Events 2026-07-28 协议契约；dot 聊天「加入码 → 四个订阅 → 测试事件真实投递 → 确认收件」的端到端流程；通过真实 Agent 执行目标步骤；协作中心页面的 Playwright 测试）、以及用 Playwright 驱动的面板 UI 冒烟测试（需要安装专用 Chromium headless shell，否则自动跳过）。
 
 Windows 一键安装脚本已在 Windows 11 + Windows PowerShell 5.1 上实跑：全新安装、重复运行（升级 + 重新配对）、计划任务开机自启与停止、删除设备后自动移除计划任务、彻底卸载命令、安装失败时恢复原 Agent。Linux 脚本在 Debian 12 上对正式 Hub 实跑过（不含自启部分）；macOS 脚本只做了语法和参数传递测试。
 

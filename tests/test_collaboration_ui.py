@@ -1,4 +1,4 @@
-"""Headless browser test of the collaboration center page (skipped without Playwright + Edge/Chromium).
+"""Headless browser test of the collaboration center (requires Playwright's dedicated headless shell).
 
 Drives webcoder/hub/static/collaboration*.js against a real hub: rooms, messages, dot / Work chat slots with WAJ join
 codes, an assistant connection joining and speaking over MCP, agent bindings, message -> task, goals, monitoring, and
@@ -18,8 +18,6 @@ import pytest
 from tests.conftest import ADMIN_PASSWORD, Hub
 from webcoder.hub.collaboration.network import Reply
 
-sync_api = pytest.importorskip("playwright.sync_api")
-
 WAJ = re.compile(r"WAJ-(?:[0-9A-F]{4}-){3}[0-9A-F]{4}")
 SCOPE = {"project": "imago", "environment_id": "production"}
 # MCP Events (as in test_collaboration_http.py): callbacks never leave the process, an in-process receiver answers.
@@ -34,19 +32,9 @@ def key() -> str:
 
 
 @pytest.fixture
-def page():
+def page(ui_browser):
     shots = os.environ.get("WEBCODER_SCREENSHOTS")
-    with sync_api.sync_playwright() as playwright:
-        browser = None
-        for kwargs in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
-            try:
-                browser = playwright.chromium.launch(headless=True, **kwargs)
-                break
-            except Exception:  # noqa: BLE001 - try the next available browser
-                continue
-        if browser is None:
-            pytest.skip("no Chromium-based browser available for Playwright")
-        context = browser.new_context(viewport={"width": 1280, "height": 900}, locale="zh-CN")
+    with ui_browser.new_context(viewport={"width": 1280, "height": 900}, locale="zh-CN") as context:
         tab = context.new_page()
         tab.problems = []
         tab.on("pageerror", lambda exc: tab.problems.append(f"pageerror: {exc}"))
@@ -60,7 +48,6 @@ def page():
 
         tab.shot = shot
         yield tab
-        browser.close()
 
 
 @pytest.fixture

@@ -82,23 +82,12 @@ frame.srcdoc = VIEWER;
 
 
 @pytest.fixture
-def browser_page():
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as playwright:
-        browser = None
-        for kwargs in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
-            try:
-                browser = playwright.chromium.launch(headless=True, **kwargs)
-                break
-            except Exception:  # noqa: BLE001 - try the next available browser
-                continue
-        if browser is None:
-            pytest.skip("no Chromium-based browser available for Playwright")
-        page = browser.new_page()
+def browser_page(ui_browser):
+    with ui_browser.new_context() as context:
+        page = context.new_page()
         page.errors = []
         page.on("pageerror", lambda exc: page.errors.append(str(exc)))
         yield page
-        browser.close()
 
 
 def test_the_viewer_draws_the_picture_the_host_sends(browser_page, tmp_path):
