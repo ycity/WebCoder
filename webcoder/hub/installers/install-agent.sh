@@ -94,6 +94,15 @@ fi
 step "安装 WebCoder Agent"
 "$PY" -m pip install --disable-pip-version-check --quiet --upgrade "$HUB/downloads/webcoder-agent.zip" </dev/null
 
+# `webcoder` (tasks for ChatGPT on the web, from a project folder) on PATH, without the venv's python with it.
+if [ -x "$VENV/bin/webcoder" ]; then
+  mkdir -p "$HOME/.local/bin" && ln -sf "$VENV/bin/webcoder" "$HOME/.local/bin/webcoder"
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) echo "提示：把 ~/.local/bin 加入 PATH 后就能在任意文件夹运行 webcoder" ;;
+  esac
+fi
+
 step "配对这台电脑"
 paired=$(agent pair --hub "$HUB" --code "$CODE")
 printf '%s\n' "${paired%%$'\n'*}"  # the rest are hints for manual setups; this script does those steps

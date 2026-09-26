@@ -80,6 +80,21 @@ try {
     & $Python -m pip install --disable-pip-version-check --quiet --upgrade "$Hub/downloads/webcoder-agent.zip"
     if ($LASTEXITCODE -ne 0) { throw 'pip 安装失败（见上方输出）。国内网络可先设置 PIP_INDEX_URL 使用镜像源。' }
 
+    # `webcoder` (tasks for ChatGPT on the web, from a project folder) on the user's PATH: a copy of the launcher
+    # pip made (it names the venv's Python by full path) in a folder of its own, so the venv's python.exe stays
+    # off PATH. A running webcoder keeps the old copy, which works the same.
+    $Launcher = Join-Path $Venv 'Scripts\webcoder.exe'
+    if (Test-Path $Launcher) {
+        $Bin = Join-Path $AgentHome 'bin'
+        New-Item -ItemType Directory -Force -Path $Bin | Out-Null
+        Copy-Item -Force $Launcher (Join-Path $Bin 'webcoder.exe') -ErrorAction SilentlyContinue
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        if (-not (@("$userPath" -split ';') -contains $Bin)) {
+            Write-Step '把 webcoder 命令加入 PATH（新开的终端里生效）'
+            [Environment]::SetEnvironmentVariable('Path', ((@("$userPath".TrimEnd(';'), $Bin) | Where-Object { $_ }) -join ';'), 'User')
+        }
+    }
+
     Write-Step '配对这台电脑'
     $paired = & $Python -m webcoder.agent --config $Config pair --hub $Hub --code $Code
     if ($LASTEXITCODE -ne 0) { throw '配对失败（见上方输出）。配对码 15 分钟内有效，可在面板重新生成。' }
