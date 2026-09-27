@@ -372,6 +372,32 @@ webcoder forget                              # 忘记本文件夹的会话，下
 
 **限制**：需要在这个浏览器里登录 ChatGPT，并且已经添加 WebCoder 应用。chatgpt.com 改版可能让扩展找不到输入框或按钮，这些选择器都集中在扩展 `content.js` 的 `SITE` 里。每次靠 `@应用名` 选中应用，找不到时报 `APP_NOT_FOUND`，并列出菜单里能看到的应用名。任务只保存在 Hub 的内存里（结束后保留 10 分钟），Hub 重启会中断正在进行的任务；浏览器暂时断线时，扩展会把事件暂存起来，重连后补发，最终结果要等 Hub 确认收到才丢弃。按 Ctrl+C 取消，或者任务超时、浏览器连接被撤销时，扩展都会停止页面上的发送和生成，不再批准任何工具。
 
+### webcoder dot：把请求交给 ChatGPT 里的 dot
+
+dot 不能被直接调用，只会被它自己订阅的事件唤醒；而「被 @ 提醒」的订阅绑定在一个讨论室、项目和 dot 位置上。所以 `webcoder dot` 用一个固定的「门铃」讨论室：dot 只需要加入、订阅一次，之后在任何项目文件夹里发的请求都 @ 到这个讨论室，请求里写明要处理的项目，dot 用自己的 WebCoder 授权去读写那个项目。
+
+**准备（一次）：**
+
+1. Hub 开启协作中心和 MCP Events：`WEBCODER_COLLABORATION_ENABLED=true`、`WEBCODER_MCP_EVENTS_ENABLED=true`。
+2. dot 聊天里能用 WebCoder 应用，授权时项目选「全部项目」（否则 dot 读不到新建的项目，`webcoder dot` 会提示）。
+3. 运行 `webcoder dot setup`：在 `~/.webcoder/dot-doorbell` 建一个门铃项目和讨论室，为 dot 建一个位置（最长 30 天），并打印一段指令。把指令完整发到 dot 聊天：dot 用加入码登记，再订阅这一个提醒事件。
+4. `webcoder dot status` 确认「提醒订阅 已订阅」，`webcoder dot test` 发一个测试事件，到 dot 聊天里核对它回复的事件编号。
+
+**使用：**
+
+```bash
+cd D:\code\my-app
+webcoder dot "看看这个项目的测试为什么慢"     # 在门铃讨论室 @dot，等它回复（默认最多 30 分钟）
+git diff | webcoder dot "review 这段改动"     # 管道传入的内容附在后面（最多 6000 字）
+webcoder dot --no-wait "整理一下 TODO"        # 发出就走，回复在 Hub 面板的讨论室里看
+webcoder dot setup --new                      # 换一个新位置（dot 要重新加入）
+```
+
+- 项目的认定和 `webcoder "任务"` 一样（git 仓库根目录，`--here` 用当前文件夹），第一次运行时自动建成项目。
+- 第一次发请求时自动允许 dot 在门铃讨论室里回复（30 天，之后的请求会自动续期）。终端轮询讨论室，dot 回复这条请求后打印出来；dot 的回复不会再唤醒别的助手。
+- 位置最长 30 天，到期后提醒不再投递：重新运行 `webcoder dot setup`，把新指令发给 dot。dot 的订阅每次最长 24 小时，要靠 dot 那边自动续订。
+- 宿主（ChatGPT 的 dot）能否订阅、收到提醒后会不会处理，还要在真实环境里验证；仓库测试用的是本地模拟的宿主。
+
 ## MCP 工具
 
 | 工具 | 权限 | 作用 |
@@ -456,6 +482,7 @@ webcoder/
 ├── agent/      # 设备端：文件操作沙箱（fileops.py）、连接循环、命令行
 ├── hub/        # 中心服务：MCP、OAuth、面板 API、Agent 中继、插件包生成、静态面板
 │   ├── browser.py      # webcoder：设备签名的 /api/cli、浏览器扩展的 /browser/ws、任务中继
+│   ├── doorbell.py     # webcoder dot：门铃讨论室、dot 位置、@ 提醒与回复（/api/cli/dot）
 │   ├── extension/      # WebCoder 浏览器扩展（MV3，Chrome / Edge）
 │   └── collaboration/  # 协作中心：dot / Work 聊天、讨论室、任务、目标、监控、MCP Events（移植自 CodePier）
 ├── cli/        # webcoder 命令行（随 Agent 安装，仅标准库）

@@ -3,6 +3,7 @@
     webcoder "把登录页的报错修好"          the task goes to this folder's ChatGPT conversation
     webcoder -n -m gpt-5-thinking "..."   a new conversation, with that model
     webcoder link                        link a browser that has the WebCoder extension
+    webcoder dot "看看这个项目的测试"       a request for your ChatGPT dot chat, about this folder
 
 The folder becomes a WebCoder project on this computer's agent (the same identity: no token needed). The hub
 hands the task to your browser's WebCoder extension, which types it into chatgpt.com; ChatGPT reads and edits
@@ -19,12 +20,13 @@ import socket
 import stat
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from webcoder import VERSION
 from webcoder.cli.client import HubClient, HubError
 
-COMMANDS = ("link", "status", "browsers", "forget", "config", "run")
+COMMANDS = ("link", "status", "browsers", "forget", "config", "dot", "run")
 DEFAULTS = {"app": "WebCoder", "model": None, "auto_approve": True, "browser": None}
 WRITE_TOOLS = {"write_file", "edit_file", "delete_path", "move_path", "make_dir", "copy_file", "restore_backup"}
 NEW_CONVERSATION = """请使用「{app}」应用（WebCoder 的 MCP 工具）完成下面的编码任务。
@@ -500,6 +502,178 @@ def cmd_config(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- dot
+DOT_ACTIONS = ("setup", "status", "test")
+DOT_MAX_TEXT = 6000
+DOORBELL_FOLDER = "dot-doorbell"
+DOORBELL_README = """# WebCoder 门铃
+
+`webcoder dot` 用的固定项目：Hub 里 dot 收提醒的讨论室挂在这个项目上。不用往这里放东西。
+"""
+SLOT_STATUS = {"invited": "等 dot 用加入码登记", "code_expired": "加入码已过期：重新运行 webcoder dot setup 换一个",
+               "expired": "已到期：运行 webcoder dot setup，让 dot 重新加入", "revoked": "已撤销",
+               "authorization_unavailable": "dot 加入时用的 WebCoder 授权已失效：运行 webcoder dot setup --new",
+               "room_paused": "讨论室在 Hub 面板里被暂停了"}
+NOTICE_STATE = {"delivering": "· 正在通知 dot", "accepted": "· dot 的宿主已收到通知（不代表 dot 已读）"}
+NOTICE_FAILED = {"not_subscribed": "dot 没有订阅提醒：运行 webcoder dot setup，把指令再发给 dot",
+                 "recipient_unavailable": "dot 的位置已到期或授权失效：运行 webcoder dot setup",
+                 "rate_limited": "一分钟内的提醒太多，这条没有发给 dot，稍后再试",
+                 "notifications_disabled": "Hub 没有开启 MCP Events",
+                 "failed": "多次重试后仍然没能通知到 dot（宿主的回调不可用）"}
+
+
+def _when(stamp) -> str:
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp)) if stamp else "—"
+
+
+def _test_state(test: dict | None) -> str:
+    if not test:
+        return "还没发过测试事件"
+    if test["state"] == "accepted":
+        return f"测试事件 {test['event_id']} 已被宿主接收"
+    if test["state"] in ("dead_letter", "abandoned"):
+        return f"测试事件 {test['event_id']} 投递失败"
+    return f"测试事件 {test['event_id']} 投递中"
+
+
+def show_doorbell(state: dict) -> None:
+    if not state.get("setup"):
+        print("还没有设置 dot 门铃：运行 webcoder dot setup")
+        return
+    slot, project = state["slot"], state.get("project") or {}
+    print(f"门铃     项目 {project.get('alias', '?')}（{project.get('root', '')}）")
+    status = SLOT_STATUS.get(slot["status"], "已登记" if slot["state"] == "registered" else slot["status"])
+    print(f"dot 位置 {status} · {_when(slot['expires_at'])} 到期")
+    if slot["state"] != "registered":
+        return
+    mentions = state["mentions"]
+    print("提醒订阅 " + ("已订阅" if mentions["subscribed"]
+                         else "还没订阅：把 webcoder dot setup 给出的指令发到 dot 聊天"))
+    tests = [route["test"] for route in mentions["routes"] if route.get("test")]
+    if mentions["subscribed"]:
+        print(f"测试     {_test_state(tests[-1] if tests else None)}")
+    speech = state["speech"]
+    print("发言权限 " + (f"已允许 dot 回复，{_when(speech['expires_at'])} 到期（发请求时自动续期）" if speech["enabled"]
+                         else "还没允许（第一次发请求时自动允许 dot 回复）"))
+    reach = state.get("connection")
+    if reach:
+        print(f"dot 授权 {reach['label']} · {'全部项目' if reach['all_projects'] else '部分项目'} · "
+              f"{'可读写' if reach['write'] else '只读'}" + ("（已撤销）" if reach["revoked"] else ""))
+
+
+def dot_setup(args, client: HubClient, config) -> int:
+    out = Output()
+    folder = home() / DOORBELL_FOLDER
+    folder.mkdir(parents=True, exist_ok=True)
+    readme = folder / "README.md"
+    if not readme.exists():
+        readme.write_text(DOORBELL_README, encoding="utf-8")
+    project = ensure_project(client, folder, None, ensure_allowed(config, folder, out))
+    state = client.post("/api/cli/dot/setup", {"project_id": project["id"], "new": args.new}, timeout=30)
+    show_doorbell(state)
+    if state.get("instruction"):
+        print("\n把下面这段话完整发到 dot 聊天里（dot 要能用 WebCoder 应用，授权时选「全部项目」）：")
+        print("-" * 60)
+        print(state["instruction"])
+        print("-" * 60)
+        print("dot 登记并订阅后，运行 webcoder dot status 确认，再用 webcoder dot test 发一个测试事件。")
+    elif state["mentions"]["subscribed"]:
+        print("\n门铃已就绪：在项目文件夹里运行 webcoder dot \"要说的话\"")
+    return 0
+
+
+def dot_test(client: HubClient) -> int:
+    state = client.post("/api/cli/dot/test", timeout=30)
+    print("测试事件已发出，等 dot 的宿主接收……")
+    deadline = time.monotonic() + 40
+    while True:
+        tests = [route["test"] for route in state["mentions"]["routes"] if route.get("test")]
+        test = tests[-1] if tests else None
+        if test and test["state"] in ("accepted", "dead_letter", "abandoned") or time.monotonic() > deadline:
+            break
+        time.sleep(2)
+        state = client.post("/api/cli/dot/status", timeout=30)
+    print(_test_state(test))
+    if test and test["state"] == "accepted":
+        print(f"到 dot 聊天里看它有没有回复编号 {test['event_id']}：回复了就说明门铃通了。")
+        return 0
+    return 1
+
+
+def dot_ask(args, client: HubClient, config, words: list[str]) -> int:
+    out = Output(quiet=args.quiet)
+    prompt = " ".join(words).strip()
+    prompt = with_context("" if prompt == "-" else prompt, "" if args.no_stdin else piped_input()).strip()
+    if not prompt:
+        raise SystemExit("缺少要对 dot 说的话：webcoder dot \"要说的话\"（或从标准输入传入）")
+    if len(prompt) > DOT_MAX_TEXT:
+        raise SystemExit(f"内容太长（{len(prompt)} 字）：发给 dot 的请求最多 {DOT_MAX_TEXT} 字")
+    root = project_root(Path.cwd(), args.here)
+    if too_broad(root) and not args.allow_broad:
+        raise SystemExit(f"{root} 是整个磁盘或用户目录，范围太大。进入具体的项目文件夹再运行，或加 --allow-broad")
+    project = ensure_project(client, root, args.alias, ensure_allowed(config, root, out))
+    out.note(f"dot · 项目 {project['alias']} · {project['root']}" + ("（新建项目）" if project.get("created") else ""))
+    sent = client.post("/api/cli/dot/messages", {"project_id": project["id"], "text": prompt,
+                                                 "client_message_id": uuid.uuid4().hex}, timeout=30)
+    for warning in sent.get("warnings") or []:
+        out.warn(warning)
+    message_id, state = sent["message_id"], sent["notification"].get("state")
+    if state != "queued":
+        out.error(NOTICE_FAILED.get(state, f"没能通知 dot（{state}）"))
+        return 1
+    if args.no_wait:
+        out.note(f"→ 已在门铃讨论室 @dot（消息 {message_id}）；它的回复会出现在 Hub 面板的讨论室里")
+        return 0
+    out.note("→ 已在门铃讨论室 @dot，等它回复（Ctrl+C 停止等待）")
+    deadline = time.monotonic() + args.timeout
+    failures = 0
+    try:
+        while True:
+            try:
+                reply = client.post(f"/api/cli/dot/messages/{message_id}", {}, timeout=30)
+                failures = 0
+            except HubError as exc:
+                failures += 1
+                if exc.code == "NOT_FOUND" or failures > 5:
+                    raise
+                time.sleep(min(2 * failures, 10))
+                continue
+            current = reply["notification"].get("state")
+            if current != state:
+                state = current
+                if state in NOTICE_STATE:
+                    out.note(NOTICE_STATE[state])
+                elif state in NOTICE_FAILED:
+                    out.error(NOTICE_FAILED[state])
+                    return 1
+            if reply["replies"]:
+                out.final("\n\n".join(item["text"] for item in reply["replies"]))
+                out.line("✓ dot 已回复", "32")
+                return 0
+            if time.monotonic() > deadline:
+                out.error(f"等了 {args.timeout} 秒还没有回复；之后的回复会出现在 Hub 面板的讨论室里")
+                return 1
+            time.sleep(5)
+    except KeyboardInterrupt:
+        out.error("已停止等待；dot 之后的回复会出现在 Hub 面板的讨论室里")
+        return 130
+
+
+def cmd_dot(args) -> int:
+    config = load_agent(args.agent_config)
+    client = HubClient.from_config(config)
+    words = list(args.words)
+    action = words[0] if len(words) == 1 and words[0] in DOT_ACTIONS else None
+    if action == "setup":
+        return dot_setup(args, client, config)
+    if action == "status":
+        show_doorbell(client.post("/api/cli/dot/status", timeout=30))
+        return 0
+    if action == "test":
+        return dot_test(client)
+    return dot_ask(args, client, config, words)
+
+
 def common_options(parser: argparse.ArgumentParser, suppress: bool = False) -> None:
     """Options every command takes, before or after a subcommand (a subcommand's copies keep the main value
     when they are not given)."""
@@ -511,7 +685,7 @@ def common_options(parser: argparse.ArgumentParser, suppress: bool = False) -> N
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="webcoder", description="在当前文件夹里，通过 ChatGPT 网页版（WebCoder 应用）"
-                                     "完成编码任务。子命令：link、status、browsers、forget、config。")
+                                     "完成编码任务。子命令：link、status、browsers、forget、config、dot。")
     parser.add_argument("--version", action="version", version=VERSION)
     common_options(parser)
     return parser
@@ -551,9 +725,20 @@ def main(argv: list[str] | None = None) -> int:
         config = sub.add_parser("config", parents=[common], help="查看或修改设置（app、model、auto_approve、browser）")
         config.add_argument("key", nargs="?")
         config.add_argument("value", nargs="?")
+        dot = sub.add_parser("dot", parents=[common], help="把请求交给 ChatGPT 里的 dot（setup、status、test，"
+                                                           "或直接写要说的话）")
+        dot.add_argument("words", nargs="*",
+                         help="setup / status / test，或要对 dot 说的话（管道传入的内容会附在后面）")
+        dot.add_argument("--new", action="store_true", help="setup：换一个新的 dot 位置（dot 要重新加入）")
+        dot.add_argument("--timeout", type=int, default=1800, help="最长等待 dot 回复的秒数（默认 1800）")
+        dot.add_argument("--no-wait", action="store_true", help="发出请求后不等回复")
+        dot.add_argument("--no-stdin", action="store_true", help="不读取管道传入的内容")
+        dot.add_argument("--alias", help="本文件夹第一次成为项目时用的项目名")
+        dot.add_argument("--allow-broad", action="store_true", help="允许把整个磁盘或用户目录当作项目")
+        dot.add_argument("-q", "--quiet", action="store_true", help="只输出 dot 的回复")
         args = parser.parse_args(argv)
         handler = {"link": cmd_link, "status": cmd_status, "browsers": cmd_browsers, "forget": cmd_forget,
-                   "config": cmd_config}[args.command]
+                   "config": cmd_config, "dot": cmd_dot}[args.command]
     else:
         if command == "run":
             argv.remove("run")

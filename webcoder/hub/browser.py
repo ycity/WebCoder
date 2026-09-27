@@ -33,6 +33,7 @@ from webcoder.common.channel import NONCE_BYTES, SIGNATURE_HEADER, request_proof
 from webcoder.common.crypto import b64d, new_token, normalize_pairing_code, pairing_code, sha256_hex
 from webcoder.common.errors import WebCoderError
 from webcoder.hub.auth import ApiError
+from webcoder.hub.doorbell import add_doorbell_routes
 from webcoder.hub.oauth import client_ip
 
 log = logging.getLogger("webcoder.hub.browser")
@@ -665,4 +666,5 @@ def make_cli_router(rt) -> APIRouter:
         await relay.cancel(relay.job_for(device, job_id))
         return {"ok": True}
 
+    add_doorbell_routes(router, rt, signed)
     return router
