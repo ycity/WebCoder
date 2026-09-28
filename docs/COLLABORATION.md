@@ -115,7 +115,8 @@ WEBCODER_ANALYSIS_DISPATCH_ENABLED=false
 开启 `WEBCODER_MCP_EVENTS_ENABLED` 后，`/mcp` 除了原有的 2025 协议外，还接受 2026-07-28 协议的请求：每个请求的 `params._meta` 带 `io.modelcontextprotocol/protocolVersion` 和 `clientCapabilities`，并用 `MCP-Protocol-Version`、`Mcp-Method`（`tools/call` 等还有 `Mcp-Name`）请求头镜像。支持 `server/discover`（声明 `capabilities.events`）、`events/list`、`events/subscribe`、`events/unsubscribe`，以及 `tools/*`、`resources/*`、`prompts/list`；结果带 `resultType: "complete"`。旧协议的 `initialize` 不声明事件。
 
 - **订阅**：`delivery.mode` 只支持 `webhook`，回调必须是无凭据、无片段的 HTTPS 地址，签名材料为 `whsec_` 加 Base64（24–64 字节）。首次订阅会向回调发送 challenge（Standard Webhooks 签名），回答正确才保存；30 分钟内用同一回调和密钥续订不再重复 challenge。`ttlMs` 被收紧到 60 秒–24 小时；换新密钥时旧密钥在 5 分钟内双签。
-- **投递**：每次投递重新解析 DNS，只连接公网单播地址并保留原 Host / TLS 主机名，不跟随重定向，不读代理设置，正文不超过 16 KiB。同一订阅按顺序投递，失败按 30 秒、2 分钟、10 分钟、30 分钟重试，最多 5 次；410、413 等不会无限重试，也不会被当作退订。
+- **投递**：每次投递重新解析 DNS，只连接公网单播地址并保留原 Host / TLS 主机名，不跟随重定向，不读环境里的代理设置，正文不超过 16 KiB。同一订阅按顺序投递，失败按 30 秒、2 分钟、10 分钟、30 分钟重试，最多 5 次；410、413 等不会无限重试，也不会被当作退订。
+- **回调代理**：宿主拒绝 Hub 所在地区时（例如 OpenAI 对来自香港的请求返回 403 `unsupported_country_region_territory`，订阅的 challenge 就会失败），设置 `WEBCODER_CALLBACK_PROXY=socks5://主机:端口`，让回调经由别处出站。只支持 SOCKS5：Hub 先在本地完成地址检查，再把检查过的 IP 交给代理，TLS 主机名不变。可以用 `ssh -N -D 127.0.0.1:1080 <可用地区的服务器>` 常驻一条隧道作为代理。
 - **游标**：订阅返回签名游标。省略或 `null` 表示从现在开始（不重放历史）；带旧游标重新订阅可以补投，最多回溯 7 天（或 `maxAgeMs`），超出时返回 `truncated: true`。
 - **错误码**：参数 / 回调地址 / 签名材料 / 游标错误为 -32602，不支持的投递方式 -32014，未授权 -32012，事件或订阅不存在 -32011（`data.kind` 区分），超出上限 -32013，回调验证失败 -32015（`data.reason` 只有固定类别，不含回调地址或响应内容）。
 

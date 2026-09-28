@@ -378,7 +378,7 @@ dot 不能被直接调用，只会被它自己订阅的事件唤醒；而「被 
 
 **准备（一次）：**
 
-1. Hub 开启协作中心和 MCP Events：`WEBCODER_COLLABORATION_ENABLED=true`、`WEBCODER_MCP_EVENTS_ENABLED=true`。
+1. Hub 开启协作中心和 MCP Events：`WEBCODER_COLLABORATION_ENABLED=true`、`WEBCODER_MCP_EVENTS_ENABLED=true`。Hub 在 OpenAI 不支持的地区（例如香港）时，dot 的订阅验证会被拒（403），还要设置 `WEBCODER_CALLBACK_PROXY`（见「配置参考」）。
 2. dot 聊天里能用 WebCoder 应用，授权时项目选「全部项目」（否则 dot 读不到新建的项目，`webcoder dot` 会提示）。
 3. 运行 `webcoder dot setup`：在 `~/.webcoder/dot-doorbell` 建一个门铃项目和讨论室，为 dot 建一个位置（最长 30 天），并打印一段指令。把指令完整发到 dot 聊天：dot 用加入码登记，再订阅这一个提醒事件。
 4. `webcoder dot status` 确认「提醒订阅 已订阅」，`webcoder dot test` 发一个测试事件，到 dot 聊天里核对它回复的事件编号。
@@ -453,6 +453,7 @@ Hub 环境变量：
 | `WEBCODER_MCP_EVENTS_ENABLED` | `false` | MCP Events（2026-07-28 协议、事件订阅、webhook 投递），需要主开关 |
 | `WEBCODER_MONITOR_COLLECTOR_ENABLED` | `false` | 采集已批准监控计划的 HTTP 探针，需要主开关 |
 | `WEBCODER_ANALYSIS_DISPATCH_ENABLED` | `false` | 监控异常自动建分析任务并投递任务通知，需要主开关 |
+| `WEBCODER_CALLBACK_PROXY` | 空 | MCP Events 回调走的 SOCKS5 代理（如 `socks5://127.0.0.1:1080`）。Hub 所在地区被宿主拒绝时用（例如 OpenAI 不接受来自香港的请求）；只用于事件回调，地址检查仍在 Hub 本地做 |
 
 Agent 配置（`~/.webcoder-agent/config.json`）：`hub_url`、`allowed_roots`、`read_only`、`proxy`（`system` / `none` / 代理地址）、`deny`（自定义拒绝列表，`null` 为内置列表）、`max_write_mb`、`backup_keep`、`mobile`（手机控制开关）、`ssh_hosts`（允许连接的服务器）、`ssh_command`（ssh 客户端路径，留空自动查找）、`git_command`、`skills` 与 `skill_dirs`（共享 skills）、`commands`（允许运行的命令行工具）与 `command_paths`（不在 PATH 上的程序路径）。
 

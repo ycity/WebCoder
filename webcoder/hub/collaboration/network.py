@@ -1,8 +1,10 @@
 """Pinned public callbacks and separately authorized registered probes.
 
-Neither transport follows redirects, reads proxy settings, or persists bodies.
+Neither transport follows redirects, reads proxy settings from the environment, or persists bodies.
 Every connection resolves and checks addresses again, then connects to an IP
-while keeping the original Host and TLS server name.
+while keeping the original Host and TLS server name. Callbacks may go through an
+explicitly configured SOCKS5 proxy (WEBCODER_CALLBACK_PROXY): it is handed the
+checked IP, never the name, so the address policy stays here.
 """
 from __future__ import annotations
 
@@ -61,9 +63,9 @@ async def callback_destination(url):
     return httpx.URL(url).copy_with(host=addresses[0]), parsed.netloc, parsed.hostname
 
 
-async def request(method, destination, headers=None, body=None, *, timeout=10, read_body=True):
+async def request(method, destination, headers=None, body=None, *, timeout=10, read_body=True, proxy=None):
     pinned_url, host_header, hostname = destination
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False, proxy=proxy) as client:
         outgoing = {'Host': host_header, 'Accept-Encoding': 'identity', **(headers or {})}
         async with client.stream(method, pinned_url, headers=outgoing, content=body,
                                  extensions={'sni_hostname': hostname}) as response:
@@ -87,13 +89,13 @@ async def within(seconds, operation):
         raise TimeoutError() from None
 
 
-async def webhook(url, body, headers):
+async def webhook(url, body, headers, *, proxy=None):
     if not isinstance(body, bytes) or len(body) > 16384:
         raise DevError('EVENT_TOO_LARGE', '事件超过 16 KiB 上限', 413)
 
     async def send():
         destination = await callback_destination(url)
-        return await request('POST', destination, headers, body)
+        return await request('POST', destination, headers, body, proxy=proxy)
     return await within(10, send())
 
 

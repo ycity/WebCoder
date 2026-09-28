@@ -47,6 +47,7 @@ class Settings:
     mcp_events_enabled: bool = False         # MCP Events: event catalog, subscriptions and webhook delivery
     monitor_collector_enabled: bool = False  # owner-approved fixed HTTP GET probes
     analysis_dispatch_enabled: bool = False  # incidents create analysis tasks; task events are delivered
+    callback_proxy: str | None = None        # socks5://host:port for MCP Events callbacks only
 
     def __post_init__(self):
         url = self.public_url.strip().rstrip("/")
@@ -63,6 +64,16 @@ class Settings:
                     if field != "collaboration_enabled" and getattr(self, field)]
         if children and not self.collaboration_enabled:
             raise ValueError(f"{', '.join(children)} need WEBCODER_COLLABORATION_ENABLED=true as well")
+        if self.callback_proxy is not None:
+            proxy = urlsplit(self.callback_proxy)
+            try:
+                port = proxy.port
+            except ValueError:
+                port = None
+            # SOCKS5 only: an HTTP CONNECT tunnel would present the pinned IP instead of the callback's TLS name.
+            if proxy.scheme != "socks5" or not proxy.hostname or not port or proxy.path not in ("", "/") \
+                    or proxy.query or proxy.fragment:
+                raise ValueError("WEBCODER_CALLBACK_PROXY must be a SOCKS5 proxy such as socks5://127.0.0.1:1080")
 
     @property
     def mcp_url(self) -> str:
@@ -93,5 +104,7 @@ class Settings:
         for field, name in COLLABORATION_FLAGS.items():
             if name in env:
                 values[field] = _flag(name, env[name])
+        if env.get("WEBCODER_CALLBACK_PROXY", "").strip():
+            values["callback_proxy"] = env["WEBCODER_CALLBACK_PROXY"].strip()
         values.update({key: value for key, value in overrides.items() if value is not None})
         return cls(**values)

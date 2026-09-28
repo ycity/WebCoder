@@ -1,5 +1,6 @@
 """Hub-owned, bounded lifecycle; no model or native CLI is a process supervisor."""
 import asyncio
+import functools
 import logging
 from contextlib import suppress
 
@@ -58,12 +59,14 @@ class CollaborationLoops:
 
 def install(rt):
     """Build the collaboration service on WebCoder's runtime (rt.collaboration). Its loops start with the app."""
+    from webcoder.hub.collaboration import network
     from webcoder.hub.collaboration.events import EventService
     from webcoder.hub.collaboration.host import HostRuntime
     from webcoder.hub.collaboration.monitor import MonitorService
     from webcoder.hub.collaboration.service import CollaborationService
     service = CollaborationService(HostRuntime(rt))
-    service.events = EventService(service)
+    proxy = rt.settings.callback_proxy
+    service.events = EventService(service, functools.partial(network.webhook, proxy=proxy) if proxy else None)
     service.monitor = MonitorService(service)
     service.health = {name: {'status': 'not_started' if enabled else 'disabled'} for name, enabled in (
         ('reconcile', service.config.enabled), ('events', service.config.events_enabled),
