@@ -381,7 +381,7 @@ dot 不能被直接调用，只会被它自己订阅的事件唤醒；而「被 
 1. Hub 开启协作中心和 MCP Events：`WEBCODER_COLLABORATION_ENABLED=true`、`WEBCODER_MCP_EVENTS_ENABLED=true`。Hub 在 OpenAI 不支持的地区（例如香港）时，dot 的订阅验证会被拒（403），还要设置 `WEBCODER_CALLBACK_PROXY`（见「配置参考」）。
 2. dot 聊天里能用 WebCoder 应用，授权时项目选「全部项目」（否则 dot 读不到新建的项目，`webcoder dot` 会提示）。
 3. 运行 `webcoder dot setup`：在 `~/.webcoder/dot-doorbell` 建一个门铃项目和讨论室，为 dot 建一个位置（最长 30 天），并打印一段指令。把指令完整发到 dot 聊天：dot 用加入码登记，再订阅这一个提醒事件。
-4. `webcoder dot status` 确认「提醒订阅 已订阅」，`webcoder dot test` 发一个测试事件，到 dot 聊天里核对它回复的事件编号。
+4. `webcoder dot status` 确认「提醒订阅 已订阅」，再运行 `webcoder dot test`：宿主接收测试事件后，dot 会在门铃讨论室里发一条「收到测试事件」，终端等到这条回复（最多 3 分钟）并打印出来，就说明整条链路通了。dot 的事件处理不一定显示在它的聊天窗口里，以终端看到的回复为准。
 
 **使用：**
 
@@ -394,7 +394,7 @@ webcoder dot setup --new                      # 换一个新位置（dot 要重�
 ```
 
 - 项目的认定和 `webcoder "任务"` 一样（git 仓库根目录，`--here` 用当前文件夹），第一次运行时自动建成项目。
-- 第一次发请求时自动允许 dot 在门铃讨论室里回复（30 天，之后的请求会自动续期）。终端轮询讨论室，dot 回复这条请求后打印出来；dot 的回复不会再唤醒别的助手。
+- dot 加入后，`webcoder dot setup`、`test` 和每次请求都会确保它能在门铃讨论室里回复（30 天，自动续期）。终端轮询讨论室，dot 回复这条请求后打印出来；dot 的回复不会再唤醒别的助手。
 - 位置最长 30 天，到期后提醒不再投递：重新运行 `webcoder dot setup`，把新指令发给 dot。dot 的订阅每次最长 24 小时，要靠 dot 那边自动续订。
 - 宿主（ChatGPT 的 dot）能否订阅、收到提醒后会不会处理，还要在真实环境里验证；仓库测试用的是本地模拟的宿主。
 

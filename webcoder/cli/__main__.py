@@ -552,9 +552,11 @@ def show_doorbell(state: dict) -> None:
     tests = [route["test"] for route in mentions["routes"] if route.get("test")]
     if mentions["subscribed"]:
         print(f"测试     {_test_state(tests[-1] if tests else None)}")
+        if mentions.get("test_reply"):
+            print(f"         dot 已回复：{mentions['test_reply']['text'][:80]}")
     speech = state["speech"]
-    print("发言权限 " + (f"已允许 dot 回复，{_when(speech['expires_at'])} 到期（发请求时自动续期）" if speech["enabled"]
-                         else "还没允许（第一次发请求时自动允许 dot 回复）"))
+    print("发言权限 " + (f"已允许 dot 回复，{_when(speech['expires_at'])} 到期（自动续期）" if speech["enabled"]
+                         else "还没允许（测试或第一次发请求时自动允许 dot 回复）"))
     reach = state.get("connection")
     if reach:
         print(f"dot 授权 {reach['label']} · {'全部项目' if reach['all_projects'] else '部分项目'} · "
@@ -594,9 +596,20 @@ def dot_test(client: HubClient) -> int:
         time.sleep(2)
         state = client.post("/api/cli/dot/status", timeout=30)
     print(_test_state(test))
-    if test and test["state"] == "accepted":
-        print(f"到 dot 聊天里看它有没有回复编号 {test['event_id']}：回复了就说明门铃通了。")
+    if not test or test["state"] != "accepted":
+        return 1
+    print("等 dot 在门铃讨论室回复（最多 3 分钟）……")
+    deadline = time.monotonic() + 180
+    while not state["mentions"].get("test_reply") and time.monotonic() < deadline:
+        time.sleep(3)
+        state = client.post("/api/cli/dot/status", timeout=30)
+    reply = state["mentions"].get("test_reply")
+    if reply:
+        print(f"✓ dot 回复了：{reply['text']}")
+        print("门铃通了：在项目文件夹里运行 webcoder dot \"要说的话\"")
         return 0
+    print("dot 的宿主收下了测试事件，但 3 分钟内 dot 没有在讨论室回复。稍后可以用 webcoder dot status 再看，"
+          "或者在 dot 聊天里问它收到测试事件后做了什么。")
     return 1
 
 

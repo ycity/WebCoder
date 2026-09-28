@@ -7,6 +7,7 @@ authorization. The CLI acts as the room's owner, the same as the signed-in panel
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
 
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from webcoder.hub.auth import ApiError
 from webcoder.hub.collaboration.common import MESSAGE_EVENT
+from webcoder.hub.collaboration.errors import DevError
 from webcoder.hub.collaboration.host import OWNER_CAPABILITIES, Principal
 
 LABEL = "WebCoder 门铃"
@@ -33,8 +35,11 @@ SUBSCRIBE = """{step}. 用宿主的原生事件订阅能力，只订阅下面这
 {next}. 以后每次收到这个事件：用 collaboration_read 读这条消息（project="{project}"，environment_id="{environment}"，\
 kind="thread"，id=事件里的 message_id）。消息里写明了要处理的项目和请求，用 WebCoder 工具按要求处理；处理完只回复一次，\
 用 collaboration_message_create（project="{project}"，room_id="{room}"，reply_to_id=这条消息的 id，\
-client_message_id 和 idempotency_key 各用一个新的随机值）。测试事件只回复事件编号。
+client_message_id 和 idempotency_key 各用一个新的随机值）。
+{test}
 回调和签名材料由宿主提供；订阅失败时报告原始错误并停止，不要编造回调或声称已接通。"""
+TEST = """测试事件（data.test 为 true）没有真实消息，不要读取：直接用 collaboration_message_create 在讨论室发一条新消息\
+（project="{project}"，room_id="{room}"，不带 reply_to_id），内容写「收到测试事件」和事件编号。"""
 REQUEST = """【WebCoder 门铃】{user} 在 {device} 上用 webcoder 命令行发来的请求。
 项目：{alias}（{project_device} 上的 {root}）。调用 WebCoder 工具时传 project="{project_id}"，路径相对于项目根目录。
 处理完后只回复一次：collaboration_message_create（project="{doorbell}"，room_id="{room}"，\
@@ -102,7 +107,8 @@ def add_doorbell_routes(router: APIRouter, rt, signed) -> None:
 
     def instruction(room: dict, slot: dict, view: dict, subscribed: bool) -> str | None:
         rest = dict(subscription=json.dumps(subscription(room, slot), ensure_ascii=False, indent=2),
-                    project=room["project_id"], environment=room["environment_id"], room=room["id"])
+                    project=room["project_id"], environment=room["environment_id"], room=room["id"],
+                    test=TEST.format(project=room["project_id"], room=room["id"]))
         if view["join_code"]:
             return JOIN.format(code=view["join_code"], rest=SUBSCRIBE.format(step=2, next=3, **rest))
         if view["state"] == "registered" and not subscribed:
@@ -126,6 +132,20 @@ def add_doorbell_routes(router: APIRouter, rt, signed) -> None:
         return store.one("SELECT enabled, expires_at, version FROM conversation_writers WHERE conversation_id=? AND "
                          "room_id=? AND grant_id=?", (room["id"], room["id"], slot["grant_id"]))
 
+    def test_reply(collaboration, room: dict, mentions: list[dict]) -> dict | None:
+        """dot's first message in the room after the latest test event: its answer to the test (only dot speaks
+        there besides the owner)."""
+        tests = [route["test"] for route in mentions if route.get("test")]
+        if not tests:
+            return None
+        event = store.one("SELECT created FROM mcp_event_outbox WHERE id=?", (tests[-1]["event_id"],))
+        if event is None:
+            return None
+        row = store.one("""SELECT * FROM collaboration_messages WHERE room_id=? AND origin='bound_connector'
+            AND created>=? ORDER BY server_sequence LIMIT 1""", (room["id"], event["created"]))
+        return {"id": row["id"], "text": collaboration.chatroom.view(row)["body_text"], "created": row["created"]} \
+            if row else None
+
     def state(collaboration, principal: Principal, room: dict, slot: dict) -> dict:
         view = collaboration.joining.view(room, slot, principal)
         mentions = [route for route in view["routes"] if route["name"] == MESSAGE_EVENT]
@@ -140,7 +160,8 @@ def add_doorbell_routes(router: APIRouter, rt, signed) -> None:
                 "subscription": subscription(room, slot),
                 "mentions": {"subscribed": subscribed,
                              "routes": [{key: route[key] for key in ("id", "state", "available", "expires_at", "test")}
-                                        for route in mentions]},
+                                        for route in mentions],
+                             "test_reply": test_reply(collaboration, room, mentions)},
                 "routes": [{key: route[key] for key in ("name", "available", "test")} for route in view["routes"]],
                 "speech": {"enabled": bool(writer and writer["enabled"] and writer["expires_at"] > now),
                            "expires_at": writer["expires_at"] if writer else None},
@@ -210,6 +231,9 @@ def add_doorbell_routes(router: APIRouter, rt, signed) -> None:
                 slot = collaboration.joining.slot(room, created["slot"]["id"])
             elif slot["state"] == "invited" and slot["code_expires_at"] <= now:
                 slot = control(collaboration, principal, room, slot, "refresh_code")
+            elif slot["state"] == "registered" and room["state"] == "active":
+                with contextlib.suppress(DevError):  # a revoked authorization shows in the state instead
+                    renew_speech(collaboration, principal, room, slot)
             return state(collaboration, principal, room, slot)
 
         return await store.run(perform)
@@ -232,6 +256,7 @@ def add_doorbell_routes(router: APIRouter, rt, signed) -> None:
         def perform():
             collaboration, principal = service(), owner(device)
             room, slot = ready(collaboration, principal, device)
+            renew_speech(collaboration, principal, room, slot)  # dot answers the test in the room
             return state(collaboration, principal, room, control(collaboration, principal, room, slot, "test"))
 
         return await store.run(perform)
