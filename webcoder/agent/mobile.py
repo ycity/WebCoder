@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import ipaddress
 import json
 import os
 import re
@@ -18,6 +19,7 @@ import subprocess
 import tempfile
 import time
 import xml.etree.ElementTree as ElementTree
+from urllib.parse import urlsplit
 
 from webcoder.agent.procs import Stopped, run_capped, run_quiet
 from webcoder.common.errors import WebCoderError
@@ -26,6 +28,11 @@ SERIAL_RE = re.compile(r"^[A-Za-z0-9._:\-]{1,128}$")
 PACKAGE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$")
 COMPONENT_RE = re.compile(r"^\.?[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*$")
 BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]{0,31}:[^\s\x00-\x1f\x7f]{1,2000}$")
+TCP_RE = re.compile(r"^tcp:\d{1,5}$")
+FAULT_RE = re.compile(r"^(cppcrash|jscrash|appfreeze|sysfreeze|rustpanic|syswarning)-[A-Za-z0-9._-]{1,200}$")
+LOG_LEVELS = ("verbose", "debug", "info", "warn", "error", "fatal")
+SHARED_NET = ipaddress.ip_network("100.64.0.0/10")  # carrier-grade NAT / Tailscale-style LAN overlays
 MAX_OUTPUT = 8 * 1024 * 1024
 MAX_SCREENSHOT = 64 * 1024 * 1024  # a lossless capture of a large screen can pass 8 MiB
 MAX_LOCAL_FILE = 2 * 1024 * 1024 * 1024  # push / install / pull stay on this computer
@@ -73,6 +80,44 @@ def _package(value) -> str:
     if not isinstance(value, str) or not PACKAGE_RE.match(value):
         raise WebCoderError("INVALID_ARGUMENT", "package must be an app package / bundle name such as com.example.app")
     return value
+
+
+def _lan_address(host, port) -> str:
+    """Wireless debugging only reaches phones on the local network: a private, loopback or link-local IPv4."""
+    try:
+        address = ipaddress.IPv4Address(host)
+    except (ipaddress.AddressValueError, TypeError, ValueError):
+        raise WebCoderError("INVALID_ARGUMENT", "host must be the phone's IPv4 address, e.g. 192.168.1.23") from None
+    if not (address.is_private or address.is_loopback or address.is_link_local or address in SHARED_NET):
+        raise WebCoderError("INVALID_ARGUMENT", "host must be a local-network address (private, loopback or "
+                            "link-local); public addresses are refused")
+    return f"{address}:{_int(port, 'port', 1, 65535)}"
+
+
+def _of_processes(rows: list[str], pids: list[str] | None) -> list[str]:
+    """Log lines of these processes only, when more than one: logcat / hilog print "date time PID TID ..."."""
+    if not pids or len(pids) < 2:
+        return rows
+    wanted = set(pids)
+    return [row for row in rows if len(row.split()) > 2 and row.split()[2] in wanted]
+
+
+def _parses(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+        host, _ = parts.hostname, parts.port  # a malformed host ("https://[") or port ("x:bad") raises
+    except ValueError:
+        return False
+    return bool(host) or parts.scheme.lower() not in ("http", "https")  # a web link needs a host
+
+
+def _has_task(parts: list[str], serial: str, first: str, second: str) -> bool:
+    """A port task line ("<serial> <first> <second> [Forward]") with these endpoints in this order."""
+    return serial in parts and any(parts[i] == first and parts[i + 1] == second for i in range(len(parts) - 1))
+
+
+def _tcp(value: int) -> str:
+    return f"tcp:{value}"
 
 
 # --------------------------------------------------------------------------- locating adb / hdc
@@ -240,6 +285,22 @@ class Backend:
     def text(self, args: list[str], serial: str | None = None, **kwargs) -> str:
         return _text(self.call(args, serial, **kwargs))
 
+    PS: tuple = ()
+
+    def pids(self, serial: str, package: str) -> list[str]:
+        """Every process of the app: the package itself and its package:name processes (e.g. :remote, :push)."""
+        found = []
+        for line in self.text(list(self.PS), serial, check=False, timeout=15).splitlines():
+            parts = line.split()
+            if len(parts) > 2 and parts[1].isdigit() and (parts[-1] == package or parts[-1].startswith(package + ":")):
+                found.append(parts[1])
+        return found
+
+    def pid(self, serial: str, package: str) -> str | None:
+        """The app's main process id (pidof matches the process name, i.e. the package / bundle name)."""
+        out = self.text(["shell", "pidof", package], serial, check=False, timeout=10).split()
+        return out[0] if out and out[0].isdigit() else None
+
     def run_shell(self, serial: str, command: str, timeout: float) -> subprocess.CompletedProcess:
         """The phone's own shell runs `command` (adb shell / hdc shell take it as one argument)."""
         if not self._server_started:
@@ -277,6 +338,7 @@ class Backend:
 
 class AdbBackend(Backend):
     platform, tool, server = "android", "adb", ("start-server",)
+    PS = ("shell", "ps", "-A")
     KEYS = {"back": "4", "home": "3", "enter": "66", "delete": "67", "tab": "61", "space": "62", "escape": "111",
             "menu": "82", "recent_apps": "187", "power": "26", "volume_up": "24", "volume_down": "25", "search": "84"}
 
@@ -331,12 +393,118 @@ class AdbBackend(Backend):
             raise WebCoderError("MOBILE_COMMAND_FAILED", "The phone did not return a PNG screenshot")
         return data, "png"
 
-    def logs(self, serial: str, lines: int) -> str:
-        return self.text(["logcat", "-d", "-t", str(lines)], serial, timeout=40)
+    def logs(self, serial: str, lines: int, pids: list[str] | None = None, level: str | None = None) -> str:
+        if not (pids or level):
+            return self.text(["logcat", "-d", "-t", str(lines)], serial, timeout=40)
+        # -t would take the last lines before filtering: filter the whole buffer, keep its newest lines.
+        one = [f"--pid={pids[0]}"] if pids and len(pids) == 1 else []  # logcat filters one pid; more are kept here
+        args = ["logcat", "-d", *one] + ([f"*:{self.LEVELS[level]}"] if level else [])
+        rows = self.text(args, serial, timeout=40, tail=True).splitlines()
+        return "\n".join(_of_processes(rows, pids)[-lines:])
+
+    LEVELS = {"verbose": "V", "debug": "D", "info": "I", "warn": "W", "error": "E", "fatal": "F"}
+
+    def crash_logs(self, serial: str, lines: int, package: str | None) -> str:
+        if not package:
+            return self.text(["logcat", "-d", "-b", "crash", "-t", str(lines)], serial, timeout=40)
+        text = self.text(["logcat", "-d", "-b", "crash"], serial, timeout=40, tail=True)  # filter, then limit
+        # A report names the crashing app once: Java "Process: com.app, PID: 123" (logged by the app's own
+        # process), native "pid: 123, tid: 456, name: x  >>> com.app <<<" (logged by crash_dump, another pid).
+        # Keep every line of the process that wrote that header: logcat's 3rd column, not the pid in the text.
+        # One writer may print several reports (an old resident debuggerd, a reused pid): split each writer's
+        # lines into reports at their first line, and keep the reports about this app.
+        name = rf"{re.escape(package)}(?::[\w.]+)?"
+        header = re.compile(rf"Process: {name}, PID: \d+|\bpid: \d+, tid: \d+, name: .*>>> {name} <<<")
+        start = re.compile(r"\*\*\* \*\*\* \*\*\*|FATAL EXCEPTION")
+        reports, current = [], {}
+        for row in text.splitlines():
+            if len(row.split()) < 3:
+                continue
+            writer = row.split()[2]
+            if start.search(row) or writer not in current:
+                current[writer] = []
+                reports.append(current[writer])
+            current[writer].append(row)
+        rows = [row for report in reports if any(header.search(line) for line in report) for row in report]
+        return "\n".join(rows[-lines:])
+
+    def clear_logs(self, serial: str) -> None:
+        self.call(["logcat", "-c"], serial, timeout=20)
+
+    def clear_data(self, serial: str, package: str) -> str:
+        return self._success(self.text(["shell", "pm", "clear", package], serial, check=False), "clear")
+
+    def open_url(self, serial: str, url: str, package: str | None, component: str | None) -> str:
+        args = ["shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", _shell_quote(url)]
+        if package:
+            args += ["-n", _shell_quote(f"{package}/{component}")] if component else ["-p", package]
+        out = self.text(args, serial, check=False)
+        # -W waits and reports "Status: ok"; anything else (crash, timeout, an error) is a failure
+        if not re.search(r"^Status: ok\s*$", out, re.M) or "Error" in out:
+            raise WebCoderError("MOBILE_COMMAND_FAILED", f"Could not open the URL: {out.strip()[-600:]}")
+        return out
+
+    def app_info(self, serial: str, package: str) -> dict:
+        out = self.text(["shell", "dumpsys", "package", package], serial)
+        if "Unable to find package" in out or f"Package [{package}]" not in out:
+            raise WebCoderError("MOBILE_APP_NOT_FOUND", f"{package} is not installed on this phone")
+        info = {}
+        for key in ("versionName", "versionCode", "targetSdk", "firstInstallTime", "lastUpdateTime", "codePath"):
+            if match := re.search(rf"\b{key}=(\S+(?: \d\d:\d\d:\d\d)?)", out):
+                info[key] = match.group(1)
+        flags = re.search(r"\bflags=\[([^\]]*)\]", out)
+        info["debuggable"] = bool(flags and "DEBUGGABLE" in flags.group(1).split())
+        return info
+
+    def memory(self, serial: str, package: str) -> str:
+        out = self.text(["shell", "dumpsys", "meminfo", package], serial, timeout=40)
+        if "No process found" in out:
+            raise WebCoderError("MOBILE_APP_NOT_RUNNING", f"{package} is not running")
+        return out
+
+    def ports(self, serial: str) -> list[dict]:
+        rows = []
+        for line in self.text(["forward", "--list"]).splitlines():  # all phones: keep this one's
+            parts = line.split()
+            if len(parts) == 3 and parts[0] == serial and TCP_RE.fullmatch(parts[1]) and TCP_RE.fullmatch(parts[2]):
+                rows.append({"direction": "forward", "computer": parts[1], "phone": parts[2]})
+        for line in self.text(["reverse", "--list"], serial).splitlines():  # "<transport> <phone> <computer>"
+            parts = line.split()
+            if len(parts) >= 3 and TCP_RE.fullmatch(parts[-2]) and TCP_RE.fullmatch(parts[-1]):
+                rows.append({"direction": "reverse", "computer": parts[-1], "phone": parts[-2]})
+        return rows
+
+    def port_add(self, serial: str, direction: str, computer: int, phone: int) -> None:
+        args = (["forward", "--no-rebind", _tcp(computer), _tcp(phone)] if direction == "forward"
+                else ["reverse", "--no-rebind", _tcp(phone), _tcp(computer)])
+        self.call(args, serial, timeout=15)
+
+    def port_remove(self, serial: str, direction: str, computer: int, phone: int) -> None:
+        args = (["forward", "--remove", _tcp(computer)] if direction == "forward"
+                else ["reverse", "--remove", _tcp(phone)])
+        self.call(args, serial, timeout=15)
+
+    def connect(self, address: str) -> str:
+        out = self.text(["connect", address], timeout=30, check=False)
+        if "connected to" not in out.lower():
+            raise WebCoderError("MOBILE_CONNECT_FAILED", f"adb connect {address} failed: {out.strip()[-400:]}")
+        return out
+
+    def pair(self, address: str, code: str) -> str:
+        out = self.text(["pair", address, code], timeout=30, check=False)
+        if "successfully paired" not in out.lower():
+            raise WebCoderError("MOBILE_CONNECT_FAILED", f"adb pair {address} failed: {out.strip()[-400:]}")
+        return out
+
+    def disconnect(self, address: str) -> str:
+        out = self.text(["disconnect", address], timeout=15, check=False)
+        if "disconnected" not in out.lower():
+            raise WebCoderError("MOBILE_CONNECT_FAILED", f"adb disconnect {address} failed: {out.strip()[-400:]}")
+        return out
 
     def launch(self, serial: str, package: str, component: str | None) -> str:
         if component:
-            return self.text(["shell", "am", "start", "-n", f"{package}/{component}"], serial)
+            return self.text(["shell", "am", "start", "-n", _shell_quote(f"{package}/{component}")], serial)
         out = self.text(["shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"], serial)
         if "No activities found" in out:
             raise WebCoderError("MOBILE_COMMAND_FAILED", f"{package} has no launchable activity (is it installed?)")
@@ -386,6 +554,7 @@ class AdbBackend(Backend):
 
 class HdcBackend(Backend):
     platform, tool, server = "harmony", "hdc", ("start",)
+    PS = ("shell", "ps", "-ef")
     KEYS = {"back": "Back", "home": "Home", "enter": "2054", "delete": "2055", "tab": "2049", "space": "2050",
             "escape": "2070", "power": "18", "volume_up": "16", "volume_down": "17"}
 
@@ -453,14 +622,146 @@ class HdcBackend(Backend):
             raise WebCoderError("MOBILE_COMMAND_FAILED", "The phone did not return a JPEG screenshot")
         return data, "jpeg"
 
-    def logs(self, serial: str, lines: int) -> str:
+    def logs(self, serial: str, lines: int, pids: list[str] | None = None, level: str | None = None) -> str:
         # -x: print the buffer and exit. The newest lines are at the end: keep the end if it is too long.
-        out = self.text(["shell", "hilog", "-x"], serial, timeout=40, tail=True)
-        return "\n".join(out.splitlines()[-lines:])
+        args = ["shell", "hilog", "-x"]
+        if pids and len(pids) == 1:  # hilog filters one pid; more are kept below
+            args += ["-P", pids[0]]
+        if level:
+            args += ["-L", self.LEVELS[level]]
+        rows = self.text(args, serial, timeout=40, tail=True).splitlines()
+        return "\n".join(_of_processes(rows, pids)[-lines:])
+
+    LEVELS = {"verbose": "D", "debug": "D", "info": "I", "warn": "W", "error": "E", "fatal": "F"}
+    FAULTLOG = "/data/log/faultlog/faultlogger"
+
+    def crash_logs(self, serial: str, lines: int, package: str | None) -> str:
+        """The newest FaultLogger reports (cppcrash / jscrash / appfreeze ...), optionally of one app."""
+        # Markers say how it went: stderr is not returned and hdc shell does not pass the exit code on.
+        folder = _shell_quote(self.FAULTLOG)
+        parent = _shell_quote(self.FAULTLOG.rsplit("/", 1)[0])
+        # "missing" when the folder, or its parent, does not exist; a parent that exists but cannot be read hides
+        # the folder, which is a failure
+        script = (f"if [ ! -e {parent} ] || {{ [ -r {parent} ] && [ -x {parent} ] && [ ! -e {folder} ]; }}; "
+                  "then echo WEBCODER_NOFAULTLOG; "
+                  f"elif ls -t {folder} 2>&1; then echo WEBCODER_LISTED; else echo WEBCODER_LSFAILED; fi")
+        listing = self.text(["shell", script], serial, check=False, timeout=20)
+        if "WEBCODER_NOFAULTLOG" in listing:
+            return f"(no crash reports: {self.FAULTLOG} does not exist on this phone)"
+        if "WEBCODER_LISTED" not in listing:
+            raise WebCoderError("MOBILE_COMMAND_FAILED", f"Cannot read {self.FAULTLOG}: {listing.strip()[-300:]}")
+        names = [name for name in listing.split() if FAULT_RE.fullmatch(name)
+                 and (not package or f"-{package}-" in name)][:3]  # whole bundle name, not a prefix of another
+        if not names:
+            return f"(no crash reports{f' of {package}' if package else ''} in {self.FAULTLOG})"
+        parts = []
+        for name in names:
+            body = self.text(["shell", "cat", f"{self.FAULTLOG}/{name}"], serial, timeout=20, tail=True)
+            parts.append(f"===== {name} =====\n" + "\n".join(body.splitlines()[-lines:]))
+        return "\n".join(parts)
+
+    def clear_logs(self, serial: str) -> None:
+        self._success(self.text(["shell", "hilog", "-r"], serial, timeout=20), "hilog -r")
+
+    def clear_data(self, serial: str, package: str) -> str:
+        return self._success(self.text(["shell", "bm", "clean", "-n", package, "-d"], serial), "clean")
+
+    def open_url(self, serial: str, url: str, package: str | None, component: str | None) -> str:
+        args = ["shell", "aa", "start", "-A", "ohos.want.action.viewData", "-U", _shell_quote(url)]
+        args += (["-b", package, "-a", _shell_quote(component or "EntryAbility")] if package
+                 else ["-e", "entity.system.browsable"])
+        return self._success(self.text(args, serial), "start")
+
+    def app_info(self, serial: str, package: str) -> dict:
+        out = self.text(["shell", "bm", "dump", "-n", package], serial)
+        try:
+            data = json.loads(out[out.index("{"):out.rindex("}") + 1])
+        except ValueError:
+            raise WebCoderError("MOBILE_APP_NOT_FOUND", f"{package} is not installed on this phone") from None
+        info, stack = {}, [data]
+        wanted = ("versionName", "versionCode", "apiTargetVersion", "debug", "codePath", "installTime", "updateTime")
+        while stack and len(info) < len(wanted):
+            item = stack.pop(0)
+            if isinstance(item, dict):
+                for key, value in item.items():
+                    if key in wanted and key not in info and not isinstance(value, (dict, list)):
+                        info[key] = value
+                    elif isinstance(value, (dict, list)):
+                        stack.append(value)
+            elif isinstance(item, list):
+                stack.extend(item)
+        info["debuggable"] = bool(info.pop("debug", False))
+        return info
+
+    def memory(self, serial: str, package: str) -> str:
+        pid = self.pid(serial, package)
+        if pid is None:
+            raise WebCoderError("MOBILE_APP_NOT_RUNNING", f"{package} is not running")
+        return self.text(["shell", "hidumper", "--mem", pid], serial, timeout=40)
+
+    def ports(self, serial: str) -> list[dict]:
+        rows = []
+        for line in self.text(["fport", "ls"], serial).splitlines():  # every phone's tasks: keep this one's
+            parts = line.split()
+            tcps = [part for part in parts if TCP_RE.fullmatch(part)]
+            if serial not in parts or len(tcps) != 2:
+                continue
+            if "[Forward]" in line:
+                rows.append({"direction": "forward", "computer": tcps[0], "phone": tcps[1]})
+            elif "[Reverse]" in line:
+                rows.append({"direction": "reverse", "computer": tcps[1], "phone": tcps[0]})
+        return rows
+
+    def port_add(self, serial: str, direction: str, computer: int, phone: int) -> None:
+        args = (["fport", _tcp(computer), _tcp(phone)] if direction == "forward"
+                else ["rport", _tcp(phone), _tcp(computer)])
+        # fport rm names a task by its pair alone: refuse a pair already used in either direction
+        if self._task_line(serial, args[1], args[2], None):
+            raise WebCoderError("MOBILE_COMMAND_FAILED", f"hdc already has a task {args[1]} {args[2]}: remove it first")
+        out = self.text(args, serial, timeout=15)
+        # fport and rport both answer "Forwardport result:OK|Failed" (hdc's shared forward code) and exit 0 either
+        # way: check the answer, then that the task is listed in that direction.
+        kind = "Forward" if direction == "forward" else "Reverse"
+        if ("forwardportresult:ok" not in out.lower().replace(" ", "")
+                or not self._task_line(serial, args[1], args[2], kind)):
+            raise WebCoderError("MOBILE_COMMAND_FAILED", f"hdc {args[0]} failed: {out.strip()[-400:]}")
+
+    def port_remove(self, serial: str, direction: str, computer: int, phone: int) -> None:
+        pair = [_tcp(computer), _tcp(phone)] if direction == "forward" else [_tcp(phone), _tcp(computer)]
+        self.remove_task(serial, *pair, direction="Forward" if direction == "forward" else "Reverse")
+
+    def _task_line(self, serial: str, local: str, remote: str, direction: str | None) -> bool:
+        listing = self.text(["fport", "ls"], serial, timeout=15)
+        return any(_has_task(line.split(), serial, local, remote) and (direction is None or f"[{direction}]" in line)
+                   for line in listing.splitlines())
+
+    def remove_task(self, serial: str, local: str, remote: str, direction: str = "Forward") -> None:
+        """hdc fport rm (it removes forward and reverse tasks alike), confirmed: hdc exits 0 whatever happened and
+        its failure texts vary, so the task list is read again and that task must be gone."""
+        out = self.text(["fport", "rm", local, remote], serial, timeout=15)
+        if self._task_line(serial, local, remote, direction):
+            raise WebCoderError("MOBILE_COMMAND_FAILED", f"hdc fport rm {local} {remote} did not remove it: "
+                                f"{out.strip()[-400:]}")
+
+    def connect(self, address: str) -> str:
+        out = self.text(["tconn", address], timeout=30, check=False)
+        if "connect ok" not in out.lower():
+            raise WebCoderError("MOBILE_CONNECT_FAILED", f"hdc tconn {address} failed: {out.strip()[-400:]}")
+        return out
+
+    def pair(self, address: str, code: str) -> str:
+        raise WebCoderError("MOBILE_UNSUPPORTED", "HarmonyOS needs no pairing code: use action=connect with the "
+                            "address shown under wireless debugging")
+
+    def disconnect(self, address: str) -> str:
+        out = self.text(["tconn", address, "-remove"], timeout=15, check=False)
+        if "remove ok" not in out.lower():  # failures read "Connect failed", "[Fail]..." and so on
+            raise WebCoderError("MOBILE_CONNECT_FAILED", f"hdc tconn {address} -remove failed: {out.strip()[-400:]}")
+        return out
 
     def launch(self, serial: str, package: str, component: str | None) -> str:
-        return self._success(self.text(["shell", "aa", "start", "-a", component or "EntryAbility", "-b", package],
-                                       serial), "start")
+        ability = _shell_quote(component or "EntryAbility")
+        return self._success(self.text(["shell", "aa", "start", "-a", ability, "-b", package], serial), "start")
 
     def stop(self, serial: str, package: str) -> str:
         return self.text(["shell", "aa", "force-stop", package], serial)
@@ -473,7 +774,8 @@ class HdcBackend(Backend):
 
     @staticmethod
     def _success(out: str, what: str) -> str:
-        if "success" not in out.lower():  # hdc exits 0 even when the phone refuses
+        lower = out.lower()
+        if "success" not in lower or any(word in lower for word in ("unsuccess", "[fail]", "error")):  # hdc exits 0
             raise WebCoderError("MOBILE_COMMAND_FAILED", f"hdc {what} failed: {out.strip()[-600:]}")
         return out
 
@@ -518,14 +820,21 @@ class MobileOps:
     OPERATIONS = {"mobile.devices": "devices", "mobile.ui": "ui", "mobile.tap": "tap", "mobile.swipe": "swipe",
                   "mobile.type": "type_text", "mobile.key": "key", "mobile.screenshot": "screenshot",
                   "mobile.logs": "logs", "mobile.app": "app", "mobile.push": "push", "mobile.pull": "pull",
-                  "mobile.info": "device_info", "mobile.shell": "shell"}
-    READS = {"mobile.devices", "mobile.ui", "mobile.logs", "mobile.info"}  # what a read-only device still does
+                  "mobile.info": "device_info", "mobile.shell": "shell",
+                  "mobile.web.pages": "pages", "mobile.web.dom": "dom", "mobile.web.evaluate": "evaluate",
+                  "mobile.web.command": "command", "mobile.web.events": "events", "mobile.web.screenshot": "screenshot",
+                  "mobile.port": "port", "mobile.connect": "connect"}
+    # mobile.logs (clear) and mobile.port (all but list) refuse their changes themselves on a read-only device
+    READS = {"mobile.devices", "mobile.ui", "mobile.logs", "mobile.info", "mobile.port", "mobile.web.pages",
+             "mobile.web.dom", "mobile.web.events"}  # what a read-only device still does
 
     def __init__(self, files, *, enabled: bool = False, tools: dict | None = None):
         self.files = files  # FileOps: the project sandbox for screenshots, pushes, pulls and installs
         self.enabled = enabled
         self.tools = tools or {}
         self._backends: list[Backend] | None = None
+        from webcoder.agent.mobile_web import MobileWeb
+        self.web = MobileWeb(self)
 
     def status(self) -> dict:
         return {"enabled": self.enabled,
@@ -539,7 +848,7 @@ class MobileOps:
             raise WebCoderError("AGENT_READ_ONLY", "The agent on this device is configured read-only: phones can be "
                                 "looked at (devices, screen layout, logs, info) but not operated, and nothing is "
                                 "saved into projects")
-        method = getattr(self, self.OPERATIONS[op])
+        method = getattr(self.web if op.startswith("mobile.web.") else self, self.OPERATIONS[op])
         try:
             inspect.signature(method).bind(**args)
         except TypeError as exc:
@@ -625,15 +934,42 @@ class MobileOps:
         return {"serial": found, "platform": backend.platform,
                 **self.files.create_file(root, path, data, max_bytes=MAX_SCREENSHOT)}
 
-    def logs(self, serial=None, lines=200, contains=None) -> dict:
+    def logs(self, serial=None, lines=200, contains=None, package=None, level=None, buffer="main",
+             clear=False) -> dict:
+        if not isinstance(clear, bool):
+            raise WebCoderError("INVALID_ARGUMENT", "clear must be a boolean")
+        if clear and self.files.sb.read_only:
+            raise WebCoderError("AGENT_READ_ONLY", "A read-only device cannot clear the phone's log")
+        count = _int(lines, "lines", 1, 5000)
+        if level is not None and level not in LOG_LEVELS:
+            raise WebCoderError("INVALID_ARGUMENT", f"level must be one of {', '.join(LOG_LEVELS)}")
+        if buffer not in ("main", "crash"):
+            raise WebCoderError("INVALID_ARGUMENT", "buffer must be main or crash")
+        if buffer == "crash" and level is not None:
+            raise WebCoderError("INVALID_ARGUMENT", "level does not apply to buffer=crash (crashes are all fatal); "
+                                "leave it out, or use contains to search them")
+        package = None if package is None else _package(package)
         backend, found = self._target(serial)
-        text = backend.logs(found, _int(lines, "lines", 1, 5000))
+        result = {"serial": found, "platform": backend.platform}
+        if clear:
+            backend.clear_logs(found)
+            return {**result, "text": "", "cleared": True}
+        pids = []
+        if buffer == "crash":
+            text = backend.crash_logs(found, count, package)
+        else:
+            if package:
+                pids = backend.pids(found, package)
+                if not pids:
+                    raise WebCoderError("MOBILE_APP_NOT_RUNNING", f"{package} is not running: launch it first (its "
+                                        "log is filtered by process), or read buffer=crash for past crashes")
+            text = backend.logs(found, count, pids, level)
         if contains:
             needle = str(contains).lower()
             text = "\n".join(line for line in text.splitlines() if needle in line.lower())
-        return {"serial": found, "platform": backend.platform, "text": text[-200_000:]}
+        return {**result, "text": text[-200_000:], "pid": ",".join(pids) or None, "buffer": buffer}
 
-    def app(self, action, package=None, component=None, root=None, path=None, serial=None) -> dict:
+    def app(self, action, package=None, component=None, root=None, path=None, serial=None, url=None) -> dict:
         backend, found = self._target(serial)
         if action == "install":
             if root is None or path is None:
@@ -645,19 +981,76 @@ class MobileOps:
             output = backend.install(found, local)
             return {"serial": found, "platform": backend.platform, "action": action, "path": display, "size": size,
                     "output": output.strip()[-2000:]}
+        if component is not None and (not isinstance(component, str) or not COMPONENT_RE.match(component)):
+            raise WebCoderError("INVALID_ARGUMENT", "component must be an activity / ability name")
+        if action == "open_url":
+            if not isinstance(url, str) or not URL_RE.match(url) or not _parses(url):
+                raise WebCoderError("INVALID_ARGUMENT", "url must be a URL or deep link such as https://… or "
+                                    "myapp://…, without spaces")
+            package = None if package is None else _package(package)
+            output = backend.open_url(found, url, package, component)
+            return {"serial": found, "platform": backend.platform, "action": action, "package": package, "url": url,
+                    "output": output.strip()[-2000:]}
         package = _package(package)
         if action == "launch":
-            if component is not None and (not isinstance(component, str) or not COMPONENT_RE.match(component)):
-                raise WebCoderError("INVALID_ARGUMENT", "component must be an activity / ability name")
             output = backend.launch(found, package, component)
         elif action == "stop":
             output = backend.stop(found, package)
         elif action == "uninstall":
             output = backend.uninstall(found, package)
+        elif action == "clear":
+            output = backend.clear_data(found, package)
         else:
-            raise WebCoderError("INVALID_ARGUMENT", "action must be launch, stop, install or uninstall")
+            raise WebCoderError("INVALID_ARGUMENT", "action must be launch, stop, install, uninstall, clear or "
+                                "open_url")
         return {"serial": found, "platform": backend.platform, "action": action, "package": package,
                 "output": output.strip()[-2000:]}
+
+    def port(self, action, computer_port=None, phone_port=None, direction=None, serial=None) -> dict:
+        """Map ports between this computer and the phone: forward (computer → phone) and reverse (phone → computer,
+        e.g. a dev server on this computer opened from the phone as localhost)."""
+        if action not in ("list", "forward", "reverse", "remove"):
+            raise WebCoderError("INVALID_ARGUMENT", "action must be list, forward, reverse or remove")
+        if action != "list":
+            if self.files.sb.read_only:
+                raise WebCoderError("AGENT_READ_ONLY", "A read-only device can list port mappings but not change them")
+            computer = _int(computer_port, "computer_port", 1024, 65535)
+            phone = _int(phone_port, "phone_port", 1024, 65535)
+            if action == "remove" and direction not in ("forward", "reverse"):
+                raise WebCoderError("INVALID_ARGUMENT", "remove needs direction forward or reverse")
+        backend, found = self._target(serial)
+        if action in ("forward", "reverse"):
+            try:
+                backend.port_add(found, action, computer, phone)
+            except WebCoderError as exc:
+                # adb / hdc may have made the mapping before failing: show what is there now, so it can be removed
+                with contextlib.suppress(WebCoderError):
+                    now = ", ".join(f"{m['direction']} {m['computer']}↔{m['phone']}" for m in backend.ports(found))
+                    exc.message += f" (mappings now: {now or 'none'}; remove any left over with action=remove)"
+                raise
+        elif action == "remove":
+            wanted = {"direction": direction, "computer": _tcp(computer), "phone": _tcp(phone)}
+            if wanted not in backend.ports(found):
+                raise WebCoderError("MOBILE_PORT_NOT_FOUND", "No such port mapping on this phone (see action=list)")
+            backend.port_remove(found, direction, computer, phone)
+        return {"serial": found, "platform": backend.platform, "action": action, "mappings": backend.ports(found)}
+
+    def connect(self, action, platform, host, port, code=None) -> dict:
+        """Wireless debugging: adb connect / pair / disconnect (Android), hdc tconn (HarmonyOS)."""
+        if action not in ("connect", "pair", "disconnect"):
+            raise WebCoderError("INVALID_ARGUMENT", "action must be connect, pair or disconnect")
+        if platform not in ("android", "harmony"):
+            raise WebCoderError("INVALID_ARGUMENT", "platform must be android or harmony")
+        address = _lan_address(host, port)
+        if action == "pair" and (not isinstance(code, str) or not re.fullmatch(r"\d{6}", code)):
+            raise WebCoderError("INVALID_ARGUMENT", "pair needs the 6-digit code shown on the phone")
+        backend = next((item for item in self.backends() if item.platform == platform), None)
+        if backend is None:
+            raise WebCoderError("MOBILE_TOOL_MISSING", f"{'adb' if platform == 'android' else 'hdc'} was not found on "
+                                "this computer")
+        output = getattr(backend, action)(address, code) if action == "pair" else getattr(backend, action)(address)
+        return {"platform": platform, "action": action, "address": address, "output": output.strip()[-2000:],
+                "devices": backend.devices(details=False)}
 
     def push(self, root, path, device_path, serial=None, overwrite=False) -> dict:
         remote = _device_path(device_path)
@@ -695,7 +1088,7 @@ class MobileOps:
                 "truncated": done.stdout_cut or len(stdout) > 200_000,
                 "duration_ms": int((time.monotonic() - started) * 1000)}
 
-    def device_info(self, kind, serial=None) -> dict:
+    def device_info(self, kind, serial=None, package=None) -> dict:
         backend, found = self._target(serial)
         if kind == "packages":
             value = backend.packages(found)
@@ -703,6 +1096,11 @@ class MobileOps:
             value = backend.current_app(found)
         elif kind == "properties":
             value = backend.properties(found)
+        elif kind == "app":
+            value = backend.app_info(found, _package(package))
+            value["pid"] = backend.pid(found, package) or "not running"
+        elif kind == "memory":
+            value = backend.memory(found, _package(package)).strip().splitlines()[:400]
         else:
-            raise WebCoderError("INVALID_ARGUMENT", "kind must be packages, current_app or properties")
+            raise WebCoderError("INVALID_ARGUMENT", "kind must be packages, current_app, properties, app or memory")
         return {"serial": found, "platform": backend.platform, "kind": kind, "value": value}

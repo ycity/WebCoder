@@ -22,6 +22,8 @@ def validate(schema: dict, value, path: str = "arguments"):
             if unknown:
                 raise SchemaError(f"{path}: unknown field(s) {', '.join(map(repr, unknown))}")
         result = {}
+        if schema.get("additionalProperties") is True:  # a free-form object (e.g. CDP params): keep what was sent
+            result = {key: copy.deepcopy(item) for key, item in value.items() if key not in props}
         for key, sub in props.items():
             if value.get(key) is not None:
                 result[key] = validate(sub, value[key], f"{path}.{key}")

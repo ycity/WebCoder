@@ -326,7 +326,7 @@ def test_screenshots_logs_apps_and_info(ops, project, phones):
             ops.dispatch("mobile.app", {"action": "stop", "package": bad})
         assert code(err) == "INVALID_ARGUMENT"
     sent = [call[3:] for call in phones.calls() if call[:3] == ["adb", "-s", "emulator-5554"]]
-    assert ["shell", "am", "start", "-n", "com.demo/.MainActivity"] in sent
+    assert ["shell", "am", "start", "-n", "'com.demo/.MainActivity'"] in sent  # quoted for the phone shell
     assert ["shell", "am", "force-stop", "com.demo"] in sent
 
     assert ops.dispatch("mobile.info", {"kind": "packages"})["value"] == ["com.android.settings", "com.demo"]
@@ -344,7 +344,7 @@ def test_harmony_apps_and_screenshot(ops, project, phones):
                                                          "path": "app.hap"})["output"]
     ops.dispatch("mobile.app", {"action": "launch", "package": "com.example.demo"})
     sent = [call[3:] for call in phones.calls() if call[:3] == ["hdc", "-t", "FAKEHM001"]]
-    assert ["shell", "aa", "start", "-a", "EntryAbility", "-b", "com.example.demo"] in sent
+    assert ["shell", "aa", "start", "-a", "'EntryAbility'", "-b", "com.example.demo"] in sent
     assert "com.example.demo" in ops.dispatch("mobile.info", {"kind": "packages"})["value"]
 
 

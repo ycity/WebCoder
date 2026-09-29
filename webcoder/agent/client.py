@@ -49,6 +49,8 @@ def _stop_running() -> None:
     """The hub revoked this device: kill the commands it started (ssh, adb, hdc) instead of letting them run to
     their timeout. File operations are short and atomic; they finish."""
     stopped = stop_all()
+    from webcoder.agent.mobile_web import stop_all as stop_web
+    stop_web()
     if stopped:
         log.warning("stopped %d running command(s): the hub revoked this device", stopped)
 

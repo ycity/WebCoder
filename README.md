@@ -119,7 +119,7 @@ Stop-ScheduledTask -TaskName 'WebCoder Agent' -ErrorAction SilentlyContinue; Unr
 1. **设备端**：面板「设备」→ 添加设备或「修改设置」时勾选「允许 AI 控制……手机 / 模拟器」，在那台电脑上运行生成的命令（或直接 `python -m webcoder.agent mobile on`）。默认关闭，Hub 无法远程打开。
 2. **授权**：访问令牌勾选「还允许控制手机」；ChatGPT 授权页上「控制手机 / 模拟器」要单独勾选（默认不勾）。ChatGPT 调用手机工具却没有这个权限时，会提示你重新授权。开启手机控制后，在 ChatGPT 的应用设置里点一次「Refresh」（找不到就删掉应用重新添加），它才会看到新工具：ChatGPT 会缓存工具列表，新建会话、重新授权都不会刷新它。
 
-**工具**：`mobile_devices`（列出手机）、`mobile_ui`（把屏幕读成文字：每个元素的文字、id 和可点击的坐标）、`mobile_tap` / `mobile_swipe` / `mobile_type` / `mobile_key`、`mobile_app`（启动、停止、卸载，或从项目文件夹安装 .apk / .hap）、`mobile_logs`（logcat / hilog）、`mobile_info`（已装应用、前台应用、机型与系统版本）、`mobile_screenshot`（截图存进项目文件夹，并直接显示在对话里）、`mobile_push` / `mobile_pull`（手机 ↔ 项目文件夹；拉取绝不覆盖，推送默认不覆盖手机上的已有文件，确需替换时显式传 overwrite）、`mobile_shell`（在手机的 shell 里执行任意命令，即 adb shell / hdc shell，例如 dumpsys、pm、am、getprop）。只有开启了手机控制、或授权里带手机权限时，这些工具才出现在工具列表里。
+**工具**：`mobile_devices`（列出手机）、`mobile_ui`（把屏幕读成文字：每个元素的文字、id 和可点击的坐标）、`mobile_tap` / `mobile_swipe` / `mobile_type` / `mobile_key`、`mobile_app`（启动、停止、卸载、清空数据、打开网址或深链，或从项目文件夹安装 .apk / .hap）、`mobile_logs`（logcat / hilog，可按应用、级别过滤，或读崩溃日志）、`mobile_logs_clear`（清空日志）、`mobile_info`（已装应用、前台应用、机型与系统版本、单个应用的版本与内存）、`mobile_screenshot`（截图存进项目文件夹，并直接显示在对话里）、`mobile_push` / `mobile_pull`（手机 ↔ 项目文件夹；拉取绝不覆盖，推送默认不覆盖手机上的已有文件，确需替换时显式传 overwrite）、`mobile_shell`（在手机的 shell 里执行任意命令，即 adb shell / hdc shell，例如 dumpsys、pm、am、getprop）、`mobile_port`（电脑 ↔ 手机端口映射）、`mobile_connect`（无线调试连接），以及调试 H5 页面的 `mobile_web_*`（见下文）。只有开启了手机控制、或授权里带手机权限时，这些工具才出现在工具列表里。
 
 **限制与安全**：
 - 截图通过 MCP Apps 组件显示在 ChatGPT 对话里给你看；图片数据只交给组件，不进模型上下文，所以模型靠 `mobile_ui` 的文字来读屏幕。
@@ -129,6 +129,52 @@ Stop-ScheduledTask -TaskName 'WebCoder Agent' -ErrorAction SilentlyContinue; Unr
 - 只限定了部分项目的令牌，只能控制托管这些项目的电脑上的手机。
 - 推送不覆盖的做法：先传到同目录的临时文件，再在手机上用一条命令检查并改名到位，所以传输期间新出现的同名文件不会被覆盖。adb / hdc 没有原子的“不覆盖”写入，检查和改名之间仍有微秒级的窗口。
 - iOS 暂不支持：真机界面自动化需要 WebDriverAgent / idb，且依赖 macOS + Xcode。
+
+### 日常调试
+
+| 需要 | 工具与参数 |
+| --- | --- |
+| 只看某个应用的日志 | `mobile_logs package=<包名> level=warn`：按应用进程过滤（应用要在运行），再按最低级别过滤，取最新的 N 行 |
+| 复现前清空日志 | `mobile_logs_clear`（`logcat -c` / `hilog -r`），之后 `mobile_logs` 只剩新日志 |
+| 看崩溃 | `mobile_logs buffer=crash [package=…]`：安卓读 crash 缓冲区（给了包名就只保留那个进程的完整崩溃栈），鸿蒙读 FaultLogger 的 cppcrash / jscrash / appfreeze 报告（最新 3 份） |
+| 应用版本、是否可调试、安装路径、进程号 | `mobile_info kind=app package=…` |
+| 内存占用 | `mobile_info kind=memory package=…`（`dumpsys meminfo` / `hidumper --mem`） |
+| 清空应用数据重来 | `mobile_app action=clear package=…`（`pm clear` / `bm clean -d`） |
+| 打开网址或深链 | `mobile_app action=open_url url=https://… 或 myapp://…`，可加 `package` 指定由哪个应用打开 |
+| 手机访问电脑上的开发服务器 | `mobile_port action=reverse computer_port=5173 phone_port=5173`：手机上的 `localhost:5173` 就是电脑的 5173 端口，H5 / RN / Flutter 热更新常用；`forward` 反过来让电脑访问手机端口；`list` / `remove` 查看和删除 |
+| 无线调试 | `mobile_connect action=pair`（安卓 11+，填手机上「使用配对码配对」给的 6 位码）→ `action=connect`；鸿蒙直接 `connect`（`hdc tconn`） |
+
+例如：`webc "清空手机日志，启动 com.example.app，复现后只看它的 warn 以上日志，找出报错原因"`。
+
+- 端口映射只做 tcp 到 tcp，端口限 1024–65535；会一直保留，直到 `remove`、拔线或重启 adb / hdc 服务。CDP 调试用的临时转发不会出现在列表里，也删不掉。
+- 无线调试只接受局域网 IPv4（私有、回环、链路本地和 100.64.0.0/10），拒绝公网地址和域名。
+- 只读设备可以看日志、应用信息和端口列表；清日志、清数据、打开链接、改端口、无线连接都会被拒绝。
+- 这些动作都记入审计。清空应用数据不可恢复，ChatGPT 会先让你确认。
+- 鸿蒙部分按 OpenHarmony 官方的 hdc / hilog / bm / aa 文档实现，并有模拟测试；安卓部分在真机上验证过。
+
+### 手机 H5 / WebView 调试（CDP）
+
+手机控制授权同时覆盖 H5 调试。安卓 Chrome / WebView 用 adb；鸿蒙 ArkWeb 用 hdc。Agent 自动发现手机的 DevTools socket，临时转发到电脑上，用 CDP 读取和操作页面，调用结束即撤销转发，不必手动执行 `adb forward` 或 `hdc fport`。
+
+App 需开启网页调试，USB 调试本身不够：Android WebView 使用 `WebView.setWebContentsDebuggingEnabled(true)`（新版 WebView 的 debuggable App 也可能默认开启）；鸿蒙使用 `webview.WebviewController.setWebDebuggingAccess(true)`，并声明 `ohos.permission.INTERNET`。保持 Web 页面打开。iOS WebKit 的调试协议暂不支持。
+
+| 工具 | 用途 |
+| --- | --- |
+| `mobile_web_pages` | 列出页面，返回手机 serial、调试 socket、target_id、标题和 URL |
+| `mobile_web_dom` | 读取页面外层 HTML，默认最多 50,000 字 |
+| `mobile_web_evaluate` | 执行 JavaScript，等待 Promise，返回值或异常，可读页面状态、点击 DOM 元素等 |
+| `mobile_web_command` | 调用页面级 CDP 命令，如 `Page.navigate`、`Page.reload`、`Input.dispatchMouseEvent` |
+| `mobile_web_events` | 在调用期间捕获 console、JS 异常、网络请求/响应等事件；`reload=true` 可边刷新边抓取 |
+| `mobile_web_screenshot` | 将 H5 页面的 PNG 截图保存到手机所连接电脑的项目中，并显示在对话里 |
+
+例如在项目文件夹运行：
+
+```bash
+webc "列出连接手机上的 H5 调试页面，找到我的页面并读取 DOM，分析登录按钮为什么点不动"
+webc "捕获这个 H5 页面 10 秒的 console 和网络事件，reload=true，检查是否有 JS 异常或请求失败"
+```
+
+多个手机用 `serial`，多个页面用返回的 `socket` 和 `target_id` 明确选择。页面重开或 App 重启后重新列出页面。每次调用使用独立 CDP 会话，因此临时 nodeId、objectId、requestId 等不保证跨调用可用；连续 DOM 操作放在同一次 JavaScript 中。事件捕获仅涵盖调用期间（1–30 秒），历史请求和长期网络监听不保留。设备只读时可发现页面、读 DOM、监听事件，不能执行 JS、其他 CDP 命令、刷新或保存截图。审计规则：直接执行原始内容的入口（`mobile_shell`、`mobile_web_evaluate`、`mobile_web_command`）把完整输入（命令、JavaScript、CDP 方法加参数）记入审计；`mobile_web_command` 不接受 `Runtime.evaluate` 等执行代码的方法，JavaScript 走 `mobile_web_evaluate`。结构化工具只记录定位信息：打开的网址去掉查询参数，日志的 `contains` 检索词不记录。
 
 ## 管理服务器（SSH）
 
