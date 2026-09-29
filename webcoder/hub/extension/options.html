@@ -32,20 +32,20 @@
 <section id="link" hidden>
   <label for="hub">Hub 地址</label>
   <input id="hub" placeholder="https://你的hub" autocomplete="off">
-  <label for="code">连接码（在终端运行 <code>webcoder link</code> 获取）</label>
+  <label for="code">连接码（在终端运行 <code>webc link</code> 获取）</label>
   <input id="code" placeholder="ABCD-EFGH" autocomplete="off" spellcheck="false">
   <button id="pair">连接</button>
   <div id="pair-error" class="error"></div>
 </section>
 
 <section id="linked" hidden>
-  <label for="name">这个浏览器的名字（webcoder --browser 用它来挑选浏览器）</label>
+  <label for="name">这个浏览器的名字（webc --browser 用它来挑选浏览器）</label>
   <div class="row"><input id="name"><button id="rename" class="plain" style="flex:none;margin-top:0">保存</button></div>
   <div id="running" class="hint"></div>
   <button id="unlink" class="plain">断开连接</button>
 </section>
 
-<p class="hint">在项目文件夹里运行 <code>webcoder "要做的事"</code>，任务会在后台标签页里发给 ChatGPT（需要已登录，并已添加 WebCoder 应用）。</p>
+<p class="hint">在项目文件夹里运行 <code>webc "要做的事"</code>，任务会在后台标签页里发给 ChatGPT（需要已登录，并已添加 WebCoder 应用）。</p>
 <script src="options.js"></script>
 </body>
 </html>

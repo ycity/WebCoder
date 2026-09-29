@@ -197,7 +197,7 @@ class BrowserRelay:
             device_id, stamp, nonce, proof = request.headers.get(SIGNATURE_HEADER, "").split(" ")
             stamp, nonce, proof = int(stamp), b64d(nonce), b64d(proof)
         except ValueError:
-            refuse(401, "SIGNATURE_REQUIRED", "This endpoint is for the webcoder command line: it signs each "
+            refuse(401, "SIGNATURE_REQUIRED", "This endpoint is for the webc command line: it signs each "
                                               "request with the device secret of a paired agent")
         now = time.time()
         if abs(now - stamp) > SIGNATURE_WINDOW:
@@ -474,7 +474,7 @@ class BrowserRelay:
         if not mine:
             raise ApiError(409, "BROWSER_OFFLINE", "No WebCoder browser extension is online for this account"
                            + (f" under the name {wanted!r}" if wanted else "")
-                           + ". Open the browser that has the extension; to link one, run: webcoder link")
+                           + ". Open the browser that has the extension; to link one, run: webc link")
         return mine[0]
 
     async def submit(self, device: dict, body: JobBody) -> Job:

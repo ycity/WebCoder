@@ -150,7 +150,7 @@ async function connect() {
     if (event.code === 4401) {  // revoked or unknown: linking again is the only way back
       chrome.storage.local.remove('token');
       abandonAll();
-      setStatus('unlinked', '这个浏览器的连接已失效，请重新运行 webcoder link 连接');
+      setStatus('unlinked', '这个浏览器的连接已失效，请重新运行 webc link 连接');
       return;
     }
     if (event.code === 4403) {  // the account was disabled: its tasks stop
@@ -215,7 +215,7 @@ function pair(hubText, codeText) {
       connect();
       finish({ ok: true });
     };
-    ws.onclose = (event) => paired || finish({ ok: false, error: event.code === 4401 ? '连接码无效、已用过或已过期：重新运行 webcoder link'
+    ws.onclose = (event) => paired || finish({ ok: false, error: event.code === 4401 ? '连接码无效、已用过或已过期：重新运行 webc link'
       : `连不上 Hub（${event.code}）：检查地址，或者 Hub 还没有更新到支持 WebCoder 扩展的版本` });
   });
 }

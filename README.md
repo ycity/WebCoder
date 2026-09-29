@@ -5,7 +5,7 @@
 
 - 支持的客户端：**ChatGPT 网页版**（开发者模式应用，Plus / Pro / Business / Enterprise / Edu）与 **Codex**（CLI / IDE 插件 / App）
 - 能力：浏览、读取、搜索、创建、编辑、移动、删除文件，**跨设备复制**；每次修改都有 SHA 校验和自动备份，可一键恢复
-- **`webcoder` 命令行**：在项目文件夹里运行 `webcoder "任务"`，由浏览器扩展把任务交给 ChatGPT 网页版（用网页版的模型和额度），回复和工具调用实时回到终端（见「webcoder 命令行」）
+- **`webc` 命令行**：在项目文件夹里运行 `webc "任务"`，由浏览器扩展把任务交给 ChatGPT 网页版（用网页版的模型和额度），回复和工具调用实时回到终端（见「webc 命令行」）
 
 ## 架构
 
@@ -325,77 +325,77 @@ bearer_token_env_var = "WEBCODER_TOKEN"
 tool_timeout_sec = 120
 ```
 
-## webcoder 命令行：在项目文件夹里把任务交给 ChatGPT 网页版
+## webc 命令行：在项目文件夹里把任务交给 ChatGPT 网页版
 
-想用 ChatGPT 网页版的模型和额度（例如只有网页版才有的模型），又想在终端里、在项目文件夹里发任务，可以用 `webcoder`。它把任务交给你浏览器里的 WebCoder 扩展，扩展在后台标签页里把任务发给 chatgpt.com；ChatGPT 照常通过 WebCoder 应用（MCP）读写这个文件夹。回复和每一次工具调用实时显示在终端里。
+想用 ChatGPT 网页版的模型和额度（例如只有网页版才有的模型），又想在终端里、在项目文件夹里发任务，可以用 `webc`。它把任务交给你浏览器里的 WebCoder 扩展，扩展在后台标签页里把任务发给 chatgpt.com；ChatGPT 照常通过 WebCoder 应用（MCP）读写这个文件夹。回复和每一次工具调用实时显示在终端里。
 
 ```text
-webcoder "任务" ──签名请求──▶ Hub ──WebSocket──▶ 浏览器扩展 ──▶ chatgpt.com（后台标签页）
+webc "任务" ──签名请求──▶ Hub ──WebSocket──▶ 浏览器扩展 ──▶ chatgpt.com（后台标签页）
       ▲                       │  ▲                                  │ ChatGPT 调用 WebCoder 应用
       └── 回复、工具调用 ◀─────┘  └────────────── /mcp ◀─────────────┘ 读写这个文件夹
 ```
 
 **准备（一次）：**
 
-1. 这台电脑已按「接入设备」装好 Agent。安装命令会顺带把 `webcoder` 放进 PATH（Windows：`~/.webcoder-agent/bin`；macOS / Linux：`~/.local/bin`），新开的终端里生效。
-2. ChatGPT 里已经添加 WebCoder 应用（见下文「用 ChatGPT 网页版修改本地文件」），授权时项目选「全部项目」，`webcoder` 新建的项目才自动可用；授权只包含部分项目时，`webcoder` 会提示。
+1. 这台电脑已按「接入设备」装好 Agent。安装命令会顺带把 `webc` 放进 PATH（Windows：`~/.webcoder-agent/bin`；macOS / Linux：`~/.local/bin`），新开的终端里生效。
+2. ChatGPT 里已经添加 WebCoder 应用（见下文「用 ChatGPT 网页版修改本地文件」），授权时项目选「全部项目」，`webc` 新建的项目才自动可用；授权只包含部分项目时，`webc` 会提示。
 3. 安装扩展：下载 `https://你的hub/downloads/webcoder-extension.zip` 并解压。Edge 打开 `edge://extensions`（Chrome 打开 `chrome://extensions`），打开「开发人员模式」，点「加载解压缩的扩展」，选择解压出来的文件夹。
-4. 连接扩展：运行 `webcoder link`，把它显示的 Hub 地址和连接码填进扩展弹窗（点工具栏上的 WebCoder 图标）。终端显示「已连接」就好了。
-5. 如果你在 ChatGPT 里给应用起的名字不是 WebCoder，运行 `webcoder config app <应用名>` 改过来。
+4. 连接扩展：运行 `webc link`，把它显示的 Hub 地址和连接码填进扩展弹窗（点工具栏上的 WebCoder 图标）。终端显示「已连接」就好了。
+5. 如果你在 ChatGPT 里给应用起的名字不是 WebCoder，运行 `webc config app <应用名>` 改过来。
 
 **使用：**
 
 ```bash
 cd D:\code\my-app
-webcoder "登录页提交后报 500，找到原因并修好"
-webcoder "再补一个单元测试"                  # 接着这个文件夹上次的会话
-webcoder -n -m gpt-5-thinking "重构 utils"    # 新会话，并指定模型（相当于 chatgpt.com/?model=…）
-webcoder --confirm "删掉旧的迁移脚本"          # 写操作不自动批准，在浏览器里逐个确认
-git diff | webcoder "review 这段改动"         # 管道传入的内容附在任务后面（--no-stdin 不读）
-webcoder status                              # Hub、浏览器、本文件夹对应的项目和会话
-webcoder forget                              # 忘记本文件夹的会话，下次开新会话
+webc "登录页提交后报 500，找到原因并修好"
+webc "再补一个单元测试"                  # 接着这个文件夹上次的会话
+webc -n -m gpt-5-thinking "重构 utils"    # 新会话，并指定模型（相当于 chatgpt.com/?model=…）
+webc --confirm "删掉旧的迁移脚本"          # 写操作不自动批准，在浏览器里逐个确认
+git diff | webc "review 这段改动"         # 管道传入的内容附在任务后面（--no-stdin 不读）
+webc status                              # Hub、浏览器、本文件夹对应的项目和会话
+webc forget                              # 忘记本文件夹的会话，下次开新会话
 ```
 
 - **项目**：默认是当前文件夹所在 git 仓库的根目录，不在 git 仓库里就是当前文件夹（`--here` 强制用当前文件夹）。第一次运行时它自动成为读写项目，项目名取文件夹名，重名时加后缀（`--alias` 可以自己起名）。文件夹不在 Agent 允许的范围内时会自动加进去，但整个磁盘和用户目录会被拒绝，除非加 `--allow-broad`。
-- **会话**：每个文件夹记住一个 ChatGPT 会话（存在 `~/.webcoder/sessions.json`），之后的任务都接着这个会话发。`-n` 或 `webcoder forget` 开新会话；用 `-m` 指定了和上次不同的模型，也会开新会话。
+- **会话**：每个文件夹记住一个 ChatGPT 会话（存在 `~/.webcoder/sessions.json`），之后的任务都接着这个会话发。`-n` 或 `webc forget` 开新会话；用 `-m` 指定了和上次不同的模型，也会开新会话。
 - **网页上发生什么**：扩展在后台标签页里打开会话，不抢焦点。每次都先在输入框里 `@WebCoder` 选上应用（菜单里名字必须完全一致），再输入任务并发送。扩展自己开的标签页会复用，空闲的最多保留 3 个。标签页里有你自己输入还没发出去的文字，或者选着别的应用时，扩展不会动这个标签页（不导航、不刷新、不关闭、不代发），改用另一个标签页。
-- **批准**：默认自动批准 WebCoder 工具的确认，并勾选「本对话记住」。只有确定是 WebCoder 的确认卡片才会被点击：卡片上的应用图标属于这个应用（按应用 ID 判断），或者卡片标题以应用的完整名字开头，而且没有和名字相近的其他应用（比如「WebCoder Test」）混淆。工具名、参数和正文里出现的「WebCoder」都不算数。判断不了的确认卡片留给你在浏览器里处理，终端会提示，任务等你处理完再结束。登录、付费之类的其他弹窗一概不碰；页面被弹窗挡住时直接报错。`--confirm` 或 `webcoder config auto_approve false` 可以关掉自动批准：这时扩展会先刷新会话页面，因为 ChatGPT 刷新后会忘掉「本对话记住」的批准（这一点按 OpenAI 文档实现，还没在真实账号上验证）。
+- **批准**：默认自动批准 WebCoder 工具的确认，并勾选「本对话记住」。只有确定是 WebCoder 的确认卡片才会被点击：卡片上的应用图标属于这个应用（按应用 ID 判断），或者卡片标题以应用的完整名字开头，而且没有和名字相近的其他应用（比如「WebCoder Test」）混淆。工具名、参数和正文里出现的「WebCoder」都不算数。判断不了的确认卡片留给你在浏览器里处理，终端会提示，任务等你处理完再结束。登录、付费之类的其他弹窗一概不碰；页面被弹窗挡住时直接报错。`--confirm` 或 `webc config auto_approve false` 可以关掉自动批准：这时扩展会先刷新会话页面，因为 ChatGPT 刷新后会忘掉「本对话记住」的批准（这一点按 OpenAI 文档实现，还没在真实账号上验证）。
 - **输出**：回复实时写到 stdout，代码块还原成 Markdown。进度和工具调用写到 stderr，工具调用来自 Hub 的审计记录，精确到文件。结束时列出改动过的文件和会话链接。`-q` 只输出最终回复。按 Ctrl+C 取消任务，浏览器里的生成也会停下。
 
 **安全：**
 
-- `webcoder` 不需要令牌。每个请求都用这台电脑 Agent 的设备密钥签名（HMAC，覆盖请求方法、路径和请求体，5 分钟内有效，只能用一次）。所以只有已配对、未停用的设备能发任务，而且只能操作这台设备上的项目。
-- 扩展用 `webcoder link` 生成的一次性连接码（15 分钟内有效）换一个长期令牌。令牌放在 WebSocket 子协议里，Hub 在接受连接之前就核对；来源不是扩展的网页连不上。`webcoder browsers --revoke <ID>` 可以撤销；账号被停用时，它的浏览器立即断开。
+- `webc` 不需要令牌。每个请求都用这台电脑 Agent 的设备密钥签名（HMAC，覆盖请求方法、路径和请求体，5 分钟内有效，只能用一次）。所以只有已配对、未停用的设备能发任务，而且只能操作这台设备上的项目。
+- 扩展用 `webc link` 生成的一次性连接码（15 分钟内有效）换一个长期令牌。令牌放在 WebSocket 子协议里，Hub 在接受连接之前就核对；来源不是扩展的网页连不上。`webc browsers --revoke <ID>` 可以撤销；账号被停用时，它的浏览器立即断开。
 - 扩展只申请了 chatgpt.com 的权限。它拿到的只是任务文本，看不到文件：文件仍由 ChatGPT 通过 MCP 读写，和平时一样受 Agent 的边界约束。
 - 自动批准意味着 ChatGPT 可以不经你确认就修改这个项目里的文件。每次修改都有自动备份（`list_backups` / `restore_backup`），git 仓库还可以用 `git diff` 检查。项目文件里可能藏着提示注入，涉及推送、SSH 或本机命令行工具的任务，建议加 `--confirm`。
 - 用程序操作 chatgpt.com 可能不符合 OpenAI 使用条款中关于自动化访问的规定，账号有被风控的风险。扩展按正常速度一次只发一条。
 
 **限制**：需要在这个浏览器里登录 ChatGPT，并且已经添加 WebCoder 应用。chatgpt.com 改版可能让扩展找不到输入框或按钮，这些选择器都集中在扩展 `content.js` 的 `SITE` 里。每次靠 `@应用名` 选中应用，找不到时报 `APP_NOT_FOUND`，并列出菜单里能看到的应用名。任务只保存在 Hub 的内存里（结束后保留 10 分钟），Hub 重启会中断正在进行的任务；浏览器暂时断线时，扩展会把事件暂存起来，重连后补发，最终结果要等 Hub 确认收到才丢弃。按 Ctrl+C 取消，或者任务超时、浏览器连接被撤销时，扩展都会停止页面上的发送和生成，不再批准任何工具。
 
-### webcoder dot：把请求交给 ChatGPT 里的 dot
+### webc dot：把请求交给 ChatGPT 里的 dot
 
-dot 不能被直接调用，只会被它自己订阅的事件唤醒；而「被 @ 提醒」的订阅绑定在一个讨论室、项目和 dot 位置上。所以 `webcoder dot` 用一个固定的「门铃」讨论室：dot 只需要加入、订阅一次，之后在任何项目文件夹里发的请求都 @ 到这个讨论室，请求里写明要处理的项目，dot 用自己的 WebCoder 授权去读写那个项目。
+dot 不能被直接调用，只会被它自己订阅的事件唤醒；而「被 @ 提醒」的订阅绑定在一个讨论室、项目和 dot 位置上。所以 `webc dot` 用一个固定的「门铃」讨论室：dot 只需要加入、订阅一次，之后在任何项目文件夹里发的请求都 @ 到这个讨论室，请求里写明要处理的项目，dot 用自己的 WebCoder 授权去读写那个项目。
 
 **准备（一次）：**
 
 1. Hub 开启协作中心和 MCP Events：`WEBCODER_COLLABORATION_ENABLED=true`、`WEBCODER_MCP_EVENTS_ENABLED=true`。Hub 在 OpenAI 不支持的地区（例如香港）时，dot 的订阅验证会被拒（403），还要设置 `WEBCODER_CALLBACK_PROXY`（见「配置参考」）。
-2. dot 聊天里能用 WebCoder 应用，授权时项目选「全部项目」（否则 dot 读不到新建的项目，`webcoder dot` 会提示）。
-3. 运行 `webcoder dot setup`：在 `~/.webcoder/dot-doorbell` 建一个门铃项目和讨论室，为 dot 建一个位置（最长 30 天），并打印一段指令。把指令完整发到 dot 聊天：dot 用加入码登记，再订阅这一个提醒事件。
-4. `webcoder dot status` 确认「提醒订阅 已订阅」，再运行 `webcoder dot test`：宿主接收测试事件后，dot 会在门铃讨论室里发一条「收到测试事件」，终端等到这条回复（最多 3 分钟）并打印出来，就说明整条链路通了。dot 的事件处理不一定显示在它的聊天窗口里，以终端看到的回复为准。
+2. dot 聊天里能用 WebCoder 应用，授权时项目选「全部项目」（否则 dot 读不到新建的项目，`webc dot` 会提示）。
+3. 运行 `webc dot setup`：在 `~/.webcoder/dot-doorbell` 建一个门铃项目和讨论室，为 dot 建一个位置（最长 30 天），并打印一段指令。把指令完整发到 dot 聊天：dot 用加入码登记，再订阅这一个提醒事件。
+4. `webc dot status` 确认「提醒订阅 已订阅」，再运行 `webc dot test`：宿主接收测试事件后，dot 会在门铃讨论室里发一条「收到测试事件」，终端等到这条回复（最多 3 分钟）并打印出来，就说明整条链路通了。dot 的事件处理不一定显示在它的聊天窗口里，以终端看到的回复为准。
 
 **使用：**
 
 ```bash
 cd D:\code\my-app
-webcoder dot "看看这个项目的测试为什么慢"     # 在门铃讨论室 @dot，等它回复（默认最多 30 分钟）
-git diff | webcoder dot "review 这段改动"     # 管道传入的内容附在后面（最多 6000 字）
-webcoder dot --no-wait "整理一下 TODO"        # 发出就走，回复在 Hub 面板的讨论室里看
-webcoder dot setup --new                      # 换一个新位置（dot 要重新加入）
+webc dot "看看这个项目的测试为什么慢"     # 在门铃讨论室 @dot，等它回复（默认最多 30 分钟）
+git diff | webc dot "review 这段改动"     # 管道传入的内容附在后面（最多 6000 字）
+webc dot --no-wait "整理一下 TODO"        # 发出就走，回复在 Hub 面板的讨论室里看
+webc dot setup --new                      # 换一个新位置（dot 要重新加入）
 ```
 
-- 项目的认定和 `webcoder "任务"` 一样（git 仓库根目录，`--here` 用当前文件夹），第一次运行时自动建成项目。
-- dot 加入后，`webcoder dot setup`、`test` 和每次请求都会确保它能在门铃讨论室里回复（30 天，自动续期）。终端轮询讨论室，dot 回复这条请求后打印出来；dot 的回复不会再唤醒别的助手。
-- 位置最长 30 天，到期后提醒不再投递：重新运行 `webcoder dot setup`，把新指令发给 dot。dot 的订阅每次最长 24 小时，要靠 dot 那边自动续订。
+- 项目的认定和 `webc "任务"` 一样（git 仓库根目录，`--here` 用当前文件夹），第一次运行时自动建成项目。
+- dot 加入后，`webc dot setup`、`test` 和每次请求都会确保它能在门铃讨论室里回复（30 天，自动续期）。终端轮询讨论室，dot 回复这条请求后打印出来；dot 的回复不会再唤醒别的助手。
+- 位置最长 30 天，到期后提醒不再投递：重新运行 `webc dot setup`，把新指令发给 dot。dot 的订阅每次最长 24 小时，要靠 dot 那边自动续订。
 - 宿主（ChatGPT 的 dot）能否订阅、收到提醒后会不会处理，还要在真实环境里验证；仓库测试用的是本地模拟的宿主。
 
 ## MCP 工具
@@ -469,11 +469,11 @@ python -m venv .venv && .venv/Scripts/python -m pip install -e ".[hub,dev]"    #
 
 原因：Windows 上系统浏览器的密码管理器可能通过空密码尝试验证当前 Windows 账户；反复用新配置提交密码表单，会产生登录失败，达到账户锁定阈值。测试网页登录密码只用于本地测试 Hub，这种系统登录尝试来自浏览器自身。专用 headless shell 避开桌面密码管理器；这里不需要修改 Windows 锁定策略。
 
-测试（502 个）使用真实的 Hub（uvicorn）和真实的 Agent（WebSocket），覆盖：webcoder（设备签名：重放、篡改、过期、停用设备；文件夹自动成为项目；扩展的一次性连接码、令牌、撤销、网页来源被拒；任务中继、工具调用回传、取消、扩展断线与重启；命令行从提交到输出的完整流程；扩展的页面脚本在仿 chatgpt.com 页面上用 Chromium headless shell 验证 @应用、自动批准与「记住」、只点自己的确认按钮、回复还原成 Markdown）、路径与权限边界、编辑语义、加密通道、MCP 协议细节、OAuth 全流程（按 ChatGPT 的方式：动态注册、空 scope、以域名作 resource、`iss`、`_meta` 重新授权；以及 Codex 的回环回调与刷新令牌轮换）、多用户隔离（设备 / 项目 / 令牌 / OAuth / 审计）、邀请与重置链接、停用与删除用户、单用户数据库自动迁移、一键安装命令（在真实的 PowerShell 和 bash 里验证含空格、引号和中文的文件夹路径原样传给安装脚本）、运行中的 Agent 热加载文件夹与重新配对、删除设备后 Agent 自动退役（在线 / 离线、伪造的删除通知无效、只清理自己的自启项）、单实例锁、手机控制（用假的 adb / hdc 验证参数转义、权限、项目边界和 MCP 工具）、SSH（用假的 ssh 验证主机白名单、选项注入防护、非交互选项、超时、上传不覆盖、下载进项目、按主机选电脑和审计）、git（用真实仓库验证钩子不执行、参数不能变成选项、机密不进 diff / 暂存 / clean、丢弃改动前的快照、推送到本地裸仓库、冲突处理和只读设备）、在对话里显示图片（用真实浏览器验证 MCP Apps 组件的握手和渲染）、skills（只读、只开放 skills 文件夹、开关与令牌范围）、本机命令行工具（禁止清单、参数原样传递、用真实 node 验证 npm 包装脚本不经过 cmd.exe、GBK 输出解码、授权与审计）、跨设备复制、stdio 桥接（含 `--token-file`）、插件包（用官方 Agent Plugins Schema 校验）、官方 MCP Python SDK 客户端、协作中心（移植自 CodePier 的服务、事件投递、加入、聊天室、目标与监控测试；MCP Events 2026-07-28 协议契约；dot 聊天「加入码 → 四个订阅 → 测试事件真实投递 → 确认收件」的端到端流程；通过真实 Agent 执行目标步骤；协作中心页面的 Playwright 测试）、以及用 Playwright 驱动的面板 UI 冒烟测试（需要安装专用 Chromium headless shell，否则自动跳过）。
+测试（502 个）使用真实的 Hub（uvicorn）和真实的 Agent（WebSocket），覆盖：webc（设备签名：重放、篡改、过期、停用设备；文件夹自动成为项目；扩展的一次性连接码、令牌、撤销、网页来源被拒；任务中继、工具调用回传、取消、扩展断线与重启；命令行从提交到输出的完整流程；扩展的页面脚本在仿 chatgpt.com 页面上用 Chromium headless shell 验证 @应用、自动批准与「记住」、只点自己的确认按钮、回复还原成 Markdown）、路径与权限边界、编辑语义、加密通道、MCP 协议细节、OAuth 全流程（按 ChatGPT 的方式：动态注册、空 scope、以域名作 resource、`iss`、`_meta` 重新授权；以及 Codex 的回环回调与刷新令牌轮换）、多用户隔离（设备 / 项目 / 令牌 / OAuth / 审计）、邀请与重置链接、停用与删除用户、单用户数据库自动迁移、一键安装命令（在真实的 PowerShell 和 bash 里验证含空格、引号和中文的文件夹路径原样传给安装脚本）、运行中的 Agent 热加载文件夹与重新配对、删除设备后 Agent 自动退役（在线 / 离线、伪造的删除通知无效、只清理自己的自启项）、单实例锁、手机控制（用假的 adb / hdc 验证参数转义、权限、项目边界和 MCP 工具）、SSH（用假的 ssh 验证主机白名单、选项注入防护、非交互选项、超时、上传不覆盖、下载进项目、按主机选电脑和审计）、git（用真实仓库验证钩子不执行、参数不能变成选项、机密不进 diff / 暂存 / clean、丢弃改动前的快照、推送到本地裸仓库、冲突处理和只读设备）、在对话里显示图片（用真实浏览器验证 MCP Apps 组件的握手和渲染）、skills（只读、只开放 skills 文件夹、开关与令牌范围）、本机命令行工具（禁止清单、参数原样传递、用真实 node 验证 npm 包装脚本不经过 cmd.exe、GBK 输出解码、授权与审计）、跨设备复制、stdio 桥接（含 `--token-file`）、插件包（用官方 Agent Plugins Schema 校验）、官方 MCP Python SDK 客户端、协作中心（移植自 CodePier 的服务、事件投递、加入、聊天室、目标与监控测试；MCP Events 2026-07-28 协议契约；dot 聊天「加入码 → 四个订阅 → 测试事件真实投递 → 确认收件」的端到端流程；通过真实 Agent 执行目标步骤；协作中心页面的 Playwright 测试）、以及用 Playwright 驱动的面板 UI 冒烟测试（需要安装专用 Chromium headless shell，否则自动跳过）。
 
 Windows 一键安装脚本已在 Windows 11 + Windows PowerShell 5.1 上实跑：全新安装、重复运行（升级 + 重新配对）、计划任务开机自启与停止、删除设备后自动移除计划任务、彻底卸载命令、安装失败时恢复原 Agent。Linux 脚本在 Debian 12 上对正式 Hub 实跑过（不含自启部分）；macOS 脚本只做了语法和参数传递测试。
 
-真实客户端验证：Codex CLI 0.149.1（`codex exec` 调用 `list_projects` → `read_file` → `edit_file`）。webcoder 在 Edge 154 + 真实 chatgpt.com 上跑通了：CLI → Hub → 扩展 → 后台标签页输入、发送、流式读取回复（代码块、列表、表格还原成 Markdown）→ 终端输出；标签页复用；管道输入；登录后新会话、同一会话的追问，以及在 `@` 菜单里选中 WebCoder 应用并完成一次只读的工具调用。写操作确认的自动批准和 `?model=` 选模型，还没有在真实账号上验证。ChatGPT 网页版的公网 HTTPS + OAuth 路径已用真实账号验证：动态注册、授权、读写项目文件，以及调用手机工具时按需重新授权（加上手机权限），之后用真机（安卓）完成列出手机、读屏幕和截图。Secure MCP Tunnel 路径按官方文档实现并用模拟流程测试，尚未用真实账号验证。
+真实客户端验证：Codex CLI 0.149.1（`codex exec` 调用 `list_projects` → `read_file` → `edit_file`）。webc 在 Edge 154 + 真实 chatgpt.com 上跑通了：CLI → Hub → 扩展 → 后台标签页输入、发送、流式读取回复（代码块、列表、表格还原成 Markdown）→ 终端输出；标签页复用；管道输入；登录后新会话、同一会话的追问，以及在 `@` 菜单里选中 WebCoder 应用并完成一次只读的工具调用。写操作确认的自动批准和 `?model=` 选模型，还没有在真实账号上验证。ChatGPT 网页版的公网 HTTPS + OAuth 路径已用真实账号验证：动态注册、授权、读写项目文件，以及调用手机工具时按需重新授权（加上手机权限），之后用真机（安卓）完成列出手机、读屏幕和截图。Secure MCP Tunnel 路径按官方文档实现并用模拟流程测试，尚未用真实账号验证。
 
 ## 目录结构
 
@@ -482,11 +482,11 @@ webcoder/
 ├── common/     # 共享：错误类型、加密通道、工具函数
 ├── agent/      # 设备端：文件操作沙箱（fileops.py）、连接循环、命令行
 ├── hub/        # 中心服务：MCP、OAuth、面板 API、Agent 中继、插件包生成、静态面板
-│   ├── browser.py      # webcoder：设备签名的 /api/cli、浏览器扩展的 /browser/ws、任务中继
-│   ├── doorbell.py     # webcoder dot：门铃讨论室、dot 位置、@ 提醒与回复（/api/cli/dot）
+│   ├── browser.py      # webc：设备签名的 /api/cli、浏览器扩展的 /browser/ws、任务中继
+│   ├── doorbell.py     # webc dot：门铃讨论室、dot 位置、@ 提醒与回复（/api/cli/dot）
 │   ├── extension/      # WebCoder 浏览器扩展（MV3，Chrome / Edge）
 │   └── collaboration/  # 协作中心：dot / Work 聊天、讨论室、任务、目标、监控、MCP Events（移植自 CodePier）
-├── cli/        # webcoder 命令行（随 Agent 安装，仅标准库）
+├── cli/        # webc 命令行（随 Agent 安装，仅标准库）
 └── bridge/     # stdio ↔ HTTP 桥接（Secure MCP Tunnel 用，仅标准库）
 tests/          # pytest：单元、端到端、SDK 兼容、面板 UI
 deploy/         # HTTPS（Caddy）部署文件

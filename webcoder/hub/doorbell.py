@@ -40,7 +40,7 @@ client_message_id 和 idempotency_key 各用一个新的随机值）。
 回调和签名材料由宿主提供；订阅失败时报告原始错误并停止，不要编造回调或声称已接通。"""
 TEST = """测试事件（data.test 为 true）没有真实消息，不要读取：直接用 collaboration_message_create 在讨论室发一条新消息\
 （project="{project}"，room_id="{room}"，不带 reply_to_id），内容写「收到测试事件」和事件编号。"""
-REQUEST = """【WebCoder 门铃】{user} 在 {device} 上用 webcoder 命令行发来的请求。
+REQUEST = """【WebCoder 门铃】{user} 在 {device} 上用 webc 命令行发来的请求。
 项目：{alias}（{project_device} 上的 {root}）。调用 WebCoder 工具时传 project="{project_id}"，路径相对于项目根目录。
 处理完后只回复一次：collaboration_message_create（project="{doorbell}"，room_id="{room}"，\
 reply_to_id 填这条消息的 id）。回复里写结论；改了文件就列出改动的文件。
@@ -172,23 +172,23 @@ def add_doorbell_routes(router: APIRouter, rt, signed) -> None:
         """The doorbell, once dot has joined it and subscribed to mentions; otherwise what is missing."""
         room, slot = find(device["user_id"])
         if slot is None:
-            raise ApiError(409, "DOORBELL_MISSING", "There is no dot doorbell yet: run webcoder dot setup")
+            raise ApiError(409, "DOORBELL_MISSING", "There is no dot doorbell yet: run webc dot setup")
         if slot["expires_at"] <= collaboration.clock():
-            raise ApiError(409, "DOORBELL_EXPIRED", "The dot doorbell has expired: run webcoder dot setup and let "
+            raise ApiError(409, "DOORBELL_EXPIRED", "The dot doorbell has expired: run webc dot setup and let "
                            "dot join again")
         if room["state"] != "active":
             raise ApiError(409, "DOORBELL_PAUSED", "The doorbell room is paused in the hub panel: resume it there")
         if slot["state"] != "registered":
             raise ApiError(409, "DOT_NOT_JOINED", "dot has not joined the doorbell yet: send the instruction from "
-                           "webcoder dot setup to the dot chat")
+                           "webc dot setup to the dot chat")
         reach = connection(slot)
         if reach is None or reach["revoked"]:
             raise ApiError(409, "DOT_UNAUTHORIZED", "The WebCoder authorization dot joined with was revoked: run "
-                           "webcoder dot setup --new and let dot join again")
+                           "webc dot setup --new and let dot join again")
         routes = collaboration.joining.routes(room, slot)
         if not any(route["name"] == MESSAGE_EVENT and route["available"] for route in routes):
             raise ApiError(409, "DOT_NOT_SUBSCRIBED", "dot joined but is not subscribed to mentions: send the "
-                           "instruction from webcoder dot setup to the dot chat again")
+                           "instruction from webc dot setup to the dot chat again")
         return room, slot
 
     def renew_speech(collaboration, principal: Principal, room: dict, slot: dict) -> float:

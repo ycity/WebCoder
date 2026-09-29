@@ -84,7 +84,7 @@ def locked(path: Path, timeout: float = 15.0):
                     lock.unlink()
                     continue
             if time.monotonic() > deadline:
-                raise SystemExit(f"{lock} 一直被占用；没有别的 webcoder 在运行时，删掉它再试") from None
+                raise SystemExit(f"{lock} 一直被占用；没有别的 webc 在运行时，删掉它再试") from None
             time.sleep(0.05)
     try:
         yield
@@ -335,7 +335,7 @@ def run_task(args, settings: dict) -> int:
     prompt = " ".join(args.prompt).strip()
     prompt = with_context("" if prompt == "-" else prompt, "" if args.no_stdin else piped_input()).strip()
     if not prompt:
-        raise SystemExit("缺少任务内容：webcoder \"要做的事\"（或从标准输入传入）")
+        raise SystemExit("缺少任务内容：webc \"要做的事\"（或从标准输入传入）")
     config = load_agent(args.agent_config)
     root = project_root(Path.cwd(), args.here)
     if too_broad(root) and not args.allow_broad:
@@ -432,7 +432,7 @@ def cmd_link(args) -> int:
                     return 0
     except KeyboardInterrupt:
         return 130
-    print("连接码已过期，重新运行 webcoder link")
+    print("连接码已过期，重新运行 webc link")
     return 1
 
 
@@ -444,7 +444,7 @@ def cmd_status(args) -> int:
     print(f"设备     {status['device']['name']}（{'在线' if status['device']['online'] else '离线'}）")
     browsers = status["browsers"]
     print("浏览器   " + ("、".join(f"{b['name']}（{'在线' if b['online'] else '离线'} · {b['id']}）" for b in browsers)
-                       if browsers else "还没有连接扩展：运行 webcoder link"))
+                       if browsers else "还没有连接扩展：运行 webc link"))
     root = project_root(Path.cwd(), args.here)
     from webcoder.agent.fileops import is_within
 
@@ -508,15 +508,15 @@ DOT_MAX_TEXT = 6000
 DOORBELL_FOLDER = "dot-doorbell"
 DOORBELL_README = """# WebCoder 门铃
 
-`webcoder dot` 用的固定项目：Hub 里 dot 收提醒的讨论室挂在这个项目上。不用往这里放东西。
+`webc dot` 用的固定项目：Hub 里 dot 收提醒的讨论室挂在这个项目上。不用往这里放东西。
 """
-SLOT_STATUS = {"invited": "等 dot 用加入码登记", "code_expired": "加入码已过期：重新运行 webcoder dot setup 换一个",
-               "expired": "已到期：运行 webcoder dot setup，让 dot 重新加入", "revoked": "已撤销",
-               "authorization_unavailable": "dot 加入时用的 WebCoder 授权已失效：运行 webcoder dot setup --new",
+SLOT_STATUS = {"invited": "等 dot 用加入码登记", "code_expired": "加入码已过期：重新运行 webc dot setup 换一个",
+               "expired": "已到期：运行 webc dot setup，让 dot 重新加入", "revoked": "已撤销",
+               "authorization_unavailable": "dot 加入时用的 WebCoder 授权已失效：运行 webc dot setup --new",
                "room_paused": "讨论室在 Hub 面板里被暂停了"}
 NOTICE_STATE = {"delivering": "· 正在通知 dot", "accepted": "· dot 的宿主已收到通知（不代表 dot 已读）"}
-NOTICE_FAILED = {"not_subscribed": "dot 没有订阅提醒：运行 webcoder dot setup，把指令再发给 dot",
-                 "recipient_unavailable": "dot 的位置已到期或授权失效：运行 webcoder dot setup",
+NOTICE_FAILED = {"not_subscribed": "dot 没有订阅提醒：运行 webc dot setup，把指令再发给 dot",
+                 "recipient_unavailable": "dot 的位置已到期或授权失效：运行 webc dot setup",
                  "rate_limited": "一分钟内的提醒太多，这条没有发给 dot，稍后再试",
                  "notifications_disabled": "Hub 没有开启 MCP Events",
                  "failed": "多次重试后仍然没能通知到 dot（宿主的回调不可用）"}
@@ -538,7 +538,7 @@ def _test_state(test: dict | None) -> str:
 
 def show_doorbell(state: dict) -> None:
     if not state.get("setup"):
-        print("还没有设置 dot 门铃：运行 webcoder dot setup")
+        print("还没有设置 dot 门铃：运行 webc dot setup")
         return
     slot, project = state["slot"], state.get("project") or {}
     print(f"门铃     项目 {project.get('alias', '?')}（{project.get('root', '')}）")
@@ -548,7 +548,7 @@ def show_doorbell(state: dict) -> None:
         return
     mentions = state["mentions"]
     print("提醒订阅 " + ("已订阅" if mentions["subscribed"]
-                         else "还没订阅：把 webcoder dot setup 给出的指令发到 dot 聊天"))
+                         else "还没订阅：把 webc dot setup 给出的指令发到 dot 聊天"))
     tests = [route["test"] for route in mentions["routes"] if route.get("test")]
     if mentions["subscribed"]:
         print(f"测试     {_test_state(tests[-1] if tests else None)}")
@@ -578,9 +578,9 @@ def dot_setup(args, client: HubClient, config) -> int:
         print("-" * 60)
         print(state["instruction"])
         print("-" * 60)
-        print("dot 登记并订阅后，运行 webcoder dot status 确认，再用 webcoder dot test 发一个测试事件。")
+        print("dot 登记并订阅后，运行 webc dot status 确认，再用 webc dot test 发一个测试事件。")
     elif state["mentions"]["subscribed"]:
-        print("\n门铃已就绪：在项目文件夹里运行 webcoder dot \"要说的话\"")
+        print("\n门铃已就绪：在项目文件夹里运行 webc dot \"要说的话\"")
     return 0
 
 
@@ -606,9 +606,9 @@ def dot_test(client: HubClient) -> int:
     reply = state["mentions"].get("test_reply")
     if reply:
         print(f"✓ dot 回复了：{reply['text']}")
-        print("门铃通了：在项目文件夹里运行 webcoder dot \"要说的话\"")
+        print("门铃通了：在项目文件夹里运行 webc dot \"要说的话\"")
         return 0
-    print("dot 的宿主收下了测试事件，但 3 分钟内 dot 没有在讨论室回复。稍后可以用 webcoder dot status 再看，"
+    print("dot 的宿主收下了测试事件，但 3 分钟内 dot 没有在讨论室回复。稍后可以用 webc dot status 再看，"
           "或者在 dot 聊天里问它收到测试事件后做了什么。")
     return 1
 
@@ -618,7 +618,7 @@ def dot_ask(args, client: HubClient, config, words: list[str]) -> int:
     prompt = " ".join(words).strip()
     prompt = with_context("" if prompt == "-" else prompt, "" if args.no_stdin else piped_input()).strip()
     if not prompt:
-        raise SystemExit("缺少要对 dot 说的话：webcoder dot \"要说的话\"（或从标准输入传入）")
+        raise SystemExit("缺少要对 dot 说的话：webc dot \"要说的话\"（或从标准输入传入）")
     if len(prompt) > DOT_MAX_TEXT:
         raise SystemExit(f"内容太长（{len(prompt)} 字）：发给 dot 的请求最多 {DOT_MAX_TEXT} 字")
     root = project_root(Path.cwd(), args.here)
@@ -697,7 +697,7 @@ def common_options(parser: argparse.ArgumentParser, suppress: bool = False) -> N
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="webcoder", description="在当前文件夹里，通过 ChatGPT 网页版（WebCoder 应用）"
+    parser = argparse.ArgumentParser(prog="webc", description="在当前文件夹里，通过 ChatGPT 网页版（WebCoder 应用）"
                                      "完成编码任务。子命令：link、status、browsers、forget、config、dot。")
     parser.add_argument("--version", action="version", version=VERSION)
     common_options(parser)
@@ -760,7 +760,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("-n", "--new", action="store_true", help="开一个新的 ChatGPT 会话")
         parser.add_argument("-m", "--model", help="新会话用的模型（如 gpt-5-thinking）；和上次不同时自动开新会话")
         parser.add_argument("--confirm", action="store_true", help="不自动批准工具调用，在浏览器里逐个确认")
-        parser.add_argument("--app", help="ChatGPT 里 WebCoder 应用的名字（默认见 webcoder config app）")
+        parser.add_argument("--app", help="ChatGPT 里 WebCoder 应用的名字（默认见 webc config app）")
         parser.add_argument("--no-app", action="store_true", help="不 @ 应用，原样发送（只聊天，ChatGPT 不能动文件）")
         parser.add_argument("--alias", help="本文件夹第一次成为项目时用的项目名")
         parser.add_argument("--browser", help="用哪个已连接的浏览器（名字或 ID）")

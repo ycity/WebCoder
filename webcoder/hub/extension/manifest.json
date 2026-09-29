@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "WebCoder",
   "version": "0.1.0",
-  "description": "把 webcoder 命令行的编码任务发到 ChatGPT 网页版（WebCoder 应用），并把回复实时传回终端。",
+  "description": "把 webc 命令行的编码任务发到 ChatGPT 网页版（WebCoder 应用），并把回复实时传回终端。",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "alarms", "scripting"],
   "host_permissions": ["https://chatgpt.com/*"],

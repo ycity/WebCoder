@@ -83,14 +83,14 @@ try {
     # `webcoder` (tasks for ChatGPT on the web, from a project folder) on the user's PATH: a copy of the launcher
     # pip made (it names the venv's Python by full path) in a folder of its own, so the venv's python.exe stays
     # off PATH. A running webcoder keeps the old copy, which works the same.
-    $Launcher = Join-Path $Venv 'Scripts\webcoder.exe'
+    $Launcher = Join-Path $Venv 'Scripts\webc.exe'
     if (Test-Path $Launcher) {
         $Bin = Join-Path $AgentHome 'bin'
         New-Item -ItemType Directory -Force -Path $Bin | Out-Null
-        Copy-Item -Force $Launcher (Join-Path $Bin 'webcoder.exe') -ErrorAction SilentlyContinue
+        Copy-Item -Force $Launcher (Join-Path $Bin 'webc.exe') -ErrorAction SilentlyContinue
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         if (-not (@("$userPath" -split ';') -contains $Bin)) {
-            Write-Step '把 webcoder 命令加入 PATH（新开的终端里生效）'
+            Write-Step '把 webc 命令加入 PATH（新开的终端里生效）'
             [Environment]::SetEnvironmentVariable('Path', ((@("$userPath".TrimEnd(';'), $Bin) | Where-Object { $_ }) -join ';'), 'User')
         }
     }

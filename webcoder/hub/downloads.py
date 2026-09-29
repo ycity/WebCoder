@@ -27,7 +27,7 @@ dependencies = ["websockets>=15", "cryptography>=42", "regex>=2024.4"]
 [project.scripts]
 webcoder-agent = "webcoder.agent.__main__:main"
 webcoder-bridge = "webcoder.bridge.__main__:main"
-webcoder = "webcoder.cli.__main__:main"
+webc = "webcoder.cli.__main__:main"
 
 [tool.setuptools]
 packages = ["webcoder", "webcoder.common", "webcoder.agent", "webcoder.bridge", "webcoder.cli"]

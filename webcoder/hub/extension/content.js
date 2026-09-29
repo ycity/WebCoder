@@ -361,7 +361,7 @@
       if (aborted) return CANCELLED;
       if (!attached.ok) {
         const seen = attached.seen && attached.seen.length ? `（菜单里有：${attached.seen.join('、')}）` : '（没有出现应用菜单）';
-        const text = `在 @ 菜单里没找到应用「${msg.app}」${seen}。用 webcoder config app <ChatGPT 里的应用名> 设置正确的名字`;
+        const text = `在 @ 菜单里没找到应用「${msg.app}」${seen}。用 webc config app <ChatGPT 里的应用名> 设置正确的名字`;
         if (msg.newChat) return { ok: false, code: 'APP_NOT_FOUND', error: text };
         warnings.push(text + '；这次照常发送，沿用会话里已用过的应用');
       }
