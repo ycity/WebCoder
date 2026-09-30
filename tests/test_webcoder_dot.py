@@ -9,6 +9,7 @@ import base64
 import json
 import re
 import threading
+import time
 import uuid
 
 import pytest
@@ -129,9 +130,13 @@ def test_dot_doorbell_from_setup_to_a_reply(hub, device, tmp_path, monkeypatch, 
             return [event for event in hub.host.events if event["data"].get("test")]
         hub.wait_for(delivered, timeout=30, what="the test event delivered to dot")
         event = delivered()[0]
-        mcp(hub, dot, "collaboration_message_create", project=event["data"]["project_id"],
-            environment_id=event["data"]["environment_id"], room_id=event["data"]["room_id"],
-            body_text=f"收到测试事件 {event['eventId']}", client_message_id=key(), idempotency_key=key())
+        room = {"project": event["data"]["project_id"], "environment_id": event["data"]["environment_id"],
+                "room_id": event["data"]["room_id"]}
+        mcp(hub, dot, "collaboration_message_create", **room, body_text="还在处理别的请求",
+            client_message_id=key(), idempotency_key=key())  # not about the test: not taken for its answer
+        time.sleep(4)
+        mcp(hub, dot, "collaboration_message_create", **room, body_text=f"收到测试事件 {event['eventId']}",
+            client_message_id=key(), idempotency_key=key())
 
     dot_side = threading.Thread(target=answer_test, daemon=True)
     dot_side.start()
@@ -197,6 +202,15 @@ def test_dot_setup_keeps_one_slot_and_replaces_stale_ones(hub, device, capsys):
     assert "DOORBELL_EXPIRED" in capsys.readouterr().err
     setup_code(config, capsys)
     assert client.post("/api/cli/dot/status")["slot"]["id"] not in (slot, current)
+
+    # The doorbell project deleted in the panel: its room keeps the slot, but setup starts over on a new project.
+    doorbell = client.post("/api/cli/dot/status")
+    assert hub.panel.delete(f"/api/projects/{doorbell['project']['id']}").status_code == 200
+    assert dot_cli(config, "status") == 0
+    assert "还没有设置 dot 门铃" in capsys.readouterr().out
+    setup_code(config, capsys)
+    again = client.post("/api/cli/dot/status")
+    assert again["project"]["id"] != doorbell["project"]["id"] and again["slot"]["id"] != doorbell["slot"]["id"]
 
 
 def test_dot_is_warned_about_projects_outside_its_authorization(hub, device, tmp_path, monkeypatch, capsys):

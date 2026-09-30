@@ -93,8 +93,10 @@ def add_doorbell_routes(router: APIRouter, rt, signed) -> None:
         return collaboration.joining.slot(room, slot["id"])
 
     def find(user_id: str) -> tuple[dict | None, dict | None]:
-        """This user's newest doorbell slot that was not revoked (an expired one too), with its room."""
+        """This user's newest doorbell slot that was not revoked (an expired one too), with its room. A room whose
+        project was deleted in the panel keeps its slots, but it can no longer be reached: it does not count."""
         slot = store.one("""SELECT j.* FROM collaboration_join_slots j JOIN collaboration_rooms r ON r.id=j.room_id
+            JOIN projects p ON p.id=r.project_id AND p.user_id=r.owner_user_id
             WHERE r.owner_user_id=? AND r.space_id=? AND j.kind='dot' AND j.label=? AND j.state!='revoked'
             ORDER BY j.created DESC LIMIT 1""", (user_id, user_id, LABEL))
         if slot is None:
@@ -132,19 +134,23 @@ def add_doorbell_routes(router: APIRouter, rt, signed) -> None:
         return store.one("SELECT enabled, expires_at, version FROM conversation_writers WHERE conversation_id=? AND "
                          "room_id=? AND grant_id=?", (room["id"], room["id"], slot["grant_id"]))
 
-    def test_reply(collaboration, room: dict, mentions: list[dict]) -> dict | None:
-        """dot's first message in the room after the latest test event: its answer to the test (only dot speaks
-        there besides the owner)."""
+    def test_reply(collaboration, room: dict, slot: dict, mentions: list[dict]) -> dict | None:
+        """dot's answer to the latest test event: a new message (not a reply to a request) from the connection that
+        joined, naming the event id or the test's message id."""
         tests = [route["test"] for route in mentions if route.get("test")]
-        if not tests:
+        if not tests or not slot["grant_id"]:
             return None
-        event = store.one("SELECT created FROM mcp_event_outbox WHERE id=?", (tests[-1]["event_id"],))
+        event = store.one("SELECT created, data FROM mcp_event_outbox WHERE id=?", (tests[-1]["event_id"],))
         if event is None:
             return None
-        row = store.one("""SELECT * FROM collaboration_messages WHERE room_id=? AND origin='bound_connector'
-            AND created>=? ORDER BY server_sequence LIMIT 1""", (room["id"], event["created"]))
-        return {"id": row["id"], "text": collaboration.chatroom.view(row)["body_text"], "created": row["created"]} \
-            if row else None
+        markers = {tests[-1]["event_id"], json.loads(event["data"]).get("message_id") or tests[-1]["event_id"]}
+        for row in store.all("""SELECT * FROM collaboration_messages WHERE room_id=? AND origin='bound_connector'
+                AND author=? AND COALESCE(reply_to_id,'')='' AND created>=? ORDER BY server_sequence LIMIT 50""",
+                             (room["id"], slot["grant_id"], event["created"])):
+            text = collaboration.chatroom.view(row)["body_text"]
+            if any(marker in text for marker in markers):
+                return {"id": row["id"], "text": text, "created": row["created"]}
+        return None
 
     def state(collaboration, principal: Principal, room: dict, slot: dict) -> dict:
         view = collaboration.joining.view(room, slot, principal)
@@ -161,7 +167,7 @@ def add_doorbell_routes(router: APIRouter, rt, signed) -> None:
                 "mentions": {"subscribed": subscribed,
                              "routes": [{key: route[key] for key in ("id", "state", "available", "expires_at", "test")}
                                         for route in mentions],
-                             "test_reply": test_reply(collaboration, room, mentions)},
+                             "test_reply": test_reply(collaboration, room, slot, mentions)},
                 "routes": [{key: route[key] for key in ("name", "available", "test")} for route in view["routes"]],
                 "speech": {"enabled": bool(writer and writer["enabled"] and writer["expires_at"] > now),
                            "expires_at": writer["expires_at"] if writer else None},
