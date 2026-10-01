@@ -339,19 +339,23 @@ python -m webcoder.hub chatgpt-plugin --skill-only                         # 只
 1. 在 [platform.openai.com → Settings → Organization → Tunnels](https://platform.openai.com/settings/organization/tunnels) 创建隧道，记下 `tunnel_id`；再创建一个 Runtime API key（需要 Tunnels Read + Use 权限）。
 2. 从 [openai/tunnel-client releases](https://github.com/openai/tunnel-client/releases/latest) 下载 tunnel-client（Windows 选 windows-amd64）。
 3. 在本机按「快速开始」启动 Hub（方式 A）和 Agent，建好项目；在「访问令牌」创建令牌，并按弹窗提示保存到 `%USERPROFILE%\.webcoder\token.txt`。
-4. 运行（路径用 `/` 分隔；`python` 需要能 `-m webcoder.bridge`，即装过本项目或 Agent 包）：
+4. 在同一台电脑上运行。`webcoder-bridge` 由 Agent 安装脚本放进 PATH：Windows 上新开的终端里即可用；macOS / Linux 上它在 `~/.local/bin`，这个目录要在 PATH 里（安装脚本会提示）。`~` 由桥接程序自己展开，所以命令里不用写用户名，主目录里有空格也没关系：
 
    ```powershell
    $env:CONTROL_PLANE_API_KEY = "<Runtime API key>"
-   tunnel-client init --sample sample_mcp_stdio_local --profile webcoder --tunnel-id <tunnel_id> --mcp-command "python -m webcoder.bridge --url http://127.0.0.1:8787/mcp --token-file C:/Users/<你>/.webcoder/token.txt"
+   tunnel-client init --sample sample_mcp_stdio_local --profile webcoder --tunnel-id <tunnel_id> --mcp-command "webcoder-bridge --url http://127.0.0.1:8787/mcp --token-file ~/.webcoder/token.txt"
    tunnel-client doctor --profile webcoder --explain
    tunnel-client run --profile webcoder
    ```
 
-5. 在 [chatgpt.com/plugins](https://chatgpt.com/plugins) 点 **+** → Connection 选 **Tunnel** 并选中刚才的隧道 → Authentication 选 **No Authentication** → 创建。
+   `--token-file` 要写上：不写时桥接程序先用环境变量 `WEBCODER_TOKEN`，那可能是给 Codex 设的另一个令牌。令牌放在别处时把路径换掉；换成的路径不能含空格，因为 tunnel-client 按空格拆分命令，而各版本 PowerShell 传递内层引号的方式不同。
+
+5. 保持 `tunnel-client run` 运行（ChatGPT 创建应用时就会经隧道读取工具列表），在 [chatgpt.com/plugins](https://chatgpt.com/plugins) 点 **+** → Connection 选 **Tunnel** 并选中刚才的隧道 → Authentication 选 **No Authentication** → 创建。
 6. 新建对话，从工具菜单加入这个应用即可。
 
-在中国大陆使用时，运行 tunnel-client 的电脑需要能访问 OpenAI（它支持通过环境变量设置出站代理）。
+在中国大陆使用时，运行 tunnel-client 的电脑需要能访问 OpenAI（它支持通过环境变量设置出站代理）。桥接程序访问本机 Hub（`127.0.0.1` / `localhost`）时不走这些代理。
+
+本地验证：tunnel-client 0.0.16 的 `init` / `doctor` 按上面的命令跑通；用它自带的本地控制面（`tunnel-client dev proxy`）走完 tunnel-client → `webcoder-bridge` → Hub → Agent，读写了项目文件。经 OpenAI 隧道服务和 ChatGPT 的那一段还没有用真实账号验证。
 
 桥接程序最多同时转发 16 个请求，再多的请求在本机排队，等前面的完成再发；它不跟随任何重定向（否则令牌会被带到别处）。
 
@@ -519,7 +523,7 @@ python -m venv .venv && .venv/Scripts/python -m pip install -e ".[hub,dev]"    #
 
 Windows 一键安装脚本已在 Windows 11 + Windows PowerShell 5.1 上实跑：全新安装、重复运行（升级 + 重新配对）、计划任务开机自启与停止、删除设备后自动移除计划任务、彻底卸载命令、安装失败时恢复原 Agent。Linux 脚本在 Debian 12 上对正式 Hub 实跑过（不含自启部分）；macOS 脚本只做了语法和参数传递测试。
 
-真实客户端验证：Codex CLI 0.149.1（`codex exec` 调用 `list_projects` → `read_file` → `edit_file`）。webc 在 Edge 154 + 真实 chatgpt.com 上跑通了：CLI → Hub → 扩展 → 后台标签页输入、发送、流式读取回复（代码块、列表、表格还原成 Markdown）→ 终端输出；标签页复用；管道输入；登录后新会话、同一会话的追问，以及在 `@` 菜单里选中 WebCoder 应用并完成一次只读的工具调用。写操作确认的自动批准和 `?model=` 选模型，还没有在真实账号上验证。ChatGPT 网页版的公网 HTTPS + OAuth 路径已用真实账号验证：动态注册、授权、读写项目文件，以及调用手机工具时按需重新授权（加上手机权限），之后用真机（安卓）完成列出手机、读屏幕和截图。Secure MCP Tunnel 路径按官方文档实现并用模拟流程测试，尚未用真实账号验证。
+真实客户端验证：Codex CLI 0.149.1（`codex exec` 调用 `list_projects` → `read_file` → `edit_file`）。webc 在 Edge 154 + 真实 chatgpt.com 上跑通了：CLI → Hub → 扩展 → 后台标签页输入、发送、流式读取回复（代码块、列表、表格还原成 Markdown）→ 终端输出；标签页复用；管道输入；登录后新会话、同一会话的追问，以及在 `@` 菜单里选中 WebCoder 应用并完成一次只读的工具调用。写操作确认的自动批准和 `?model=` 选模型，还没有在真实账号上验证。ChatGPT 网页版的公网 HTTPS + OAuth 路径已用真实账号验证：动态注册、授权、读写项目文件，以及调用手机工具时按需重新授权（加上手机权限），之后用真机（安卓）完成列出手机、读屏幕和截图。Secure MCP Tunnel 路径用 tunnel-client 0.0.16 的本地控制面（`dev proxy`）走通了 tunnel-client → 桥接程序 → Hub → Agent 的读写，经 OpenAI 隧道服务和 ChatGPT 的一段尚未用真实账号验证。
 
 ## 目录结构
 
@@ -545,4 +549,4 @@ docs/           # 专题文档（协作中心）
 - 多用户之间互相隔离，但都要信任 Hub 的运营者（见「多用户」）。
 - OAuth 客户端注册只支持动态注册（DCR），暂不支持 CIMD。
 - 未实现 MCP 2026-07-28 无状态协议本身（新版客户端会自动回退到 2025-11-25）。
-- Docker / Caddy 部署文件、Secure MCP Tunnel 接入尚未在本次开发环境中实测。
+- Docker / Caddy 部署文件尚未在本次开发环境中实测；Secure MCP Tunnel 只在本地控制面上实测过（见上文）。

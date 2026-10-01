@@ -597,8 +597,9 @@ async function viewClients() {
         <li>在 <code>platform.openai.com</code> →「Settings → Organization → Tunnels」创建隧道，记下 <code>tunnel_id</code>；再创建一个 Runtime API key（需要 Tunnels Read + Use 权限）</li>
         <li>从 <code>github.com/openai/tunnel-client/releases</code> 下载 tunnel-client（Windows 选 windows-amd64）</li>
         <li>在「访问令牌」创建令牌，并按弹窗提示保存到令牌文件</li>
-        <li>在同一台电脑上运行（这台电脑需要装有 webcoder，<code>python -m webcoder.bridge</code> 能运行；路径请用 / 分隔）：</li></ol>
+        <li>在装了 WebCoder Agent 的同一台电脑上运行。Agent 安装脚本把 <code>webcoder-bridge</code> 放进了 PATH：Windows 上新开的终端里即可用；macOS / Linux 上它在 <code>~/.local/bin</code>，这个目录要在 PATH 里：</li></ol>
       ${codeBlock(s.tunnel_key_env_windows)}${codeBlock(s.tunnel_init)}${codeBlock(s.tunnel_check)}${codeBlock(s.tunnel_run)}
+      <p class="muted">下一步创建应用时，<code>tunnel-client run</code> 要一直开着：ChatGPT 创建时就会经隧道读取工具列表。</p>
       <ol class="steps" start="5">${chatgptSteps}
         <li>Connection 选 <b>Tunnel</b> 并选中刚才的隧道；Authentication 选 <b>No Authentication</b>（隧道只属于你的组织，令牌由桥接程序携带）</li>
         <li>新建对话，从工具菜单加入这个应用即可</li></ol>`,

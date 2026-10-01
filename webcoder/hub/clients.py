@@ -84,7 +84,9 @@ def setup_snippets(public_url: str, token: str | None = None) -> dict:
     """Copy-paste instructions for each supported client."""
     mcp = public_url.rstrip("/") + "/mcp"
     tok = token or "<你的访问令牌>"
-    bridge = f"python -m webcoder.bridge --url {mcp} --token-file C:/Users/<你>/.webcoder/token.txt"
+    # The file is named explicitly: a WEBCODER_TOKEN set for Codex would otherwise win. The bridge expands ~ itself,
+    # so the command has no user name or space to get right.
+    bridge = f"webcoder-bridge --url {mcp} --token-file ~/.webcoder/token.txt"
     return {
         "mcp_url": mcp,
         # ChatGPT, route 1: the hub itself is on public HTTPS; ChatGPT signs in with OAuth.

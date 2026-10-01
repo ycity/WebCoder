@@ -5,20 +5,23 @@ server behind OpenAI's Secure MCP Tunnel (tunnel-client stdio profile), which le
 ChatGPT reach a hub that is not publicly reachable. Standard library only. The
 token comes from an environment variable or a file, never from the command line.
 
-    python -m webcoder.bridge --url http://127.0.0.1:8787/mcp --token-file ~/.webcoder/token.txt
+    webcoder-bridge --url http://127.0.0.1:8787/mcp      # token from WEBCODER_TOKEN, else ~/.webcoder/token.txt
 """
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
+DEFAULT_TOKEN_FILE = "~/.webcoder/token.txt"
 _write_lock = threading.Lock()
 _state = {"protocol_version": None}
 MAX_IN_FLIGHT = 16  # requests forwarded at once (each can wait minutes for a slow tool)
@@ -111,21 +114,46 @@ def _forward(opener, url: str, token: str, message: dict) -> None:
         _emit(reply)
 
 
+def _is_loopback(url: str) -> bool:
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="webcoder-bridge", description=__doc__.splitlines()[0])
     parser.add_argument("--url", default=os.environ.get("WEBCODER_URL"), help="hub MCP URL, e.g. https://hub/mcp")
     parser.add_argument("--token-env", default="WEBCODER_TOKEN", help="environment variable holding the token")
-    parser.add_argument("--token-file", type=Path, help="file holding the token (alternative to --token-env)")
+    parser.add_argument("--token-file", type=Path, help="file holding the token (alternative to --token-env; "
+                                                        f"default when neither is set: {DEFAULT_TOKEN_FILE})")
     parser.add_argument("--no-proxy", action="store_true", help="ignore HTTP(S)_PROXY settings")
     args = parser.parse_args(argv)
     if not args.url:
         parser.error("--url (or WEBCODER_URL) is required")
-    token = (args.token_file.read_text(encoding="utf-8").strip() if args.token_file
-             else os.environ.get(args.token_env, "").strip())
+    token_file = args.token_file.expanduser() if args.token_file else None
+    token = os.environ.get(args.token_env, "").strip() if token_file is None else ""
+    if token_file is None and not token:
+        token_file = Path(DEFAULT_TOKEN_FILE).expanduser()  # where the panel tells people to save the token
+        if not token_file.is_file():
+            parser.error(f"no token: set {args.token_env}, pass --token-file, or save it to {DEFAULT_TOKEN_FILE}")
+    if token_file is not None:
+        try:
+            token = token_file.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            parser.error(f"cannot read the token file {token_file}: {exc.strerror or exc}")
     if not token:
         parser.error(f"no token: set {args.token_env} or pass --token-file")
-    opener = urllib.request.build_opener(_NoRedirects,
-                                         *([urllib.request.ProxyHandler({})] if args.no_proxy else []))
+    # A hub on this computer is never reached through a proxy: tunnel-client often runs with HTTP(S)_PROXY set
+    # (to reach OpenAI), which the bridge inherits; through it the request would fail and the token leave.
+    direct = args.no_proxy or _is_loopback(args.url)
+    opener = urllib.request.build_opener(_NoRedirects, *([urllib.request.ProxyHandler({})] if direct else []))
     _log(f"relaying stdio to {args.url}")
     workers: list[threading.Thread] = []
     slots = threading.BoundedSemaphore(MAX_IN_FLIGHT)  # full: stop reading stdin until a request finishes
