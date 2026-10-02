@@ -233,7 +233,10 @@ def hdc(args: list[str]) -> int:
     if args[:1] == ["start"]:
         return 0
     if args[:3] == ["list", "targets", "-v"]:
-        out("".join(f"{key}\tUSB\t{state}\tlocalhost\thdc\n" for key, state in scenario()["hdc"]) or "[Empty]\n")
+        # Windows hdc lists serial ports as well, as UART targets in a "Ready" state
+        out("".join(f"{key}\tUSB\t{state}\tlocalhost\thdc\n" for key, state in scenario()["hdc"])
+            + "".join(f"{port}\t\tUART\tReady\tunknown...\thdc\n" for port in scenario().get("hdc_uart", []))
+            or "[Empty]\n")
         return 0
     serial = args[1] if args[:1] == ["-t"] else ""
     if args[:1] == ["-t"]:
@@ -302,6 +305,9 @@ def hdc(args: list[str]) -> int:
     if args[:1] == ["shell"] and len(args) == 2 and (code := phone_shell(args[1])) is not None:
         return code
     if command.startswith("shell param get"):
+        if serial in scenario().get("hdc_uart", []) or scenario().get("hdc_model_fails"):
+            out("[Fail][E001005] Device not found or connected\n")  # what hdc prints, with exit code 0
+            return 0
         out({"const.product.model": "Mate 60", "const.ohos.apiversion": "12"}.get(args[3], "") + "\n")
     elif command.startswith("shell uitest dumpLayout -p"):
         on_phone(args[4]).parent.mkdir(parents=True, exist_ok=True)

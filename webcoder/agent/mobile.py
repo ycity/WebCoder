@@ -567,13 +567,16 @@ class HdcBackend(Backend):
             parts = line.split()
             if not parts or parts[0].startswith("["):  # "[Empty]" when nothing is attached
                 continue
+            if parts[1:2] == ["UART"]:  # on Windows -v also lists serial ports ("COM1  UART  Ready ..."): not phones
+                continue
             # -v adds "USB/TCP  Connected/Offline ..." columns; a bare key is a connected target
             state = READY if "Connected" in parts or len(parts) == 1 else (
                 parts[2].lower() if len(parts) > 2 else "unknown")
             model = ""
             if details and state == READY and SERIAL_RE.match(parts[0]):
                 with contextlib.suppress(WebCoderError):
-                    model = self.text(["shell", "param", "get", "const.product.model"], parts[0], timeout=10).strip()
+                    value = self.text(["shell", "param", "get", "const.product.model"], parts[0], timeout=10).strip()
+                    model = "" if value.startswith("[Fail]") else value  # hdc exits 0 with its error as the output
             items.append({"serial": parts[0], "platform": self.platform, "state": state, "model": model})
         return items
 

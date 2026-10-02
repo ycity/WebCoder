@@ -110,6 +110,16 @@ def test_devices_and_picking_a_phone(ops, phones):
     assert code(err) == "MOBILE_NO_DEVICE"
 
 
+def test_harmony_list_skips_serial_ports_and_failed_models(ops, phones):
+    # Windows hdc lists COM ports as "COM1  UART  Ready ..."; they are not phones and must not be picked
+    phones.only(adb=[], hdc_uart=["COM1", "COM4"])
+    listed = ops.dispatch("mobile.devices", {})["devices"]
+    assert [(d["serial"], d["state"], d["model"]) for d in listed] == [("FAKEHM001", "ready", "Mate 60")]
+    assert ops.dispatch("mobile.ui", {})["serial"] == "FAKEHM001"  # the only phone, not ambiguous with the ports
+    phones.only(adb=[], hdc_model_fails=True)
+    assert ops.dispatch("mobile.devices", {})["devices"][0]["model"] == ""  # not hdc's "[Fail]..." text
+
+
 def test_android_screen_input_and_keys(ops, phones):
     phones.only(hdc=[])
     ui = ops.dispatch("mobile.ui", {})
