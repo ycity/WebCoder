@@ -16,6 +16,7 @@ import contextlib
 import json
 import os
 import re
+import signal
 import socket
 import stat
 import sys
@@ -44,6 +45,9 @@ NEW_CONVERSATION = """请使用「{app}」应用（WebCoder 的 MCP 工具）完
 FOLLOW_UP = """（项目 {alias}，继续用「{app}」应用的工具操作文件）
 {prompt}"""
 PLAIN = "{prompt}"  # --no-app: the task as typed, no app attached
+# --bare: the task brings its own instructions (e.g. a review service's prompt); only say which app and project
+BARE = ("请使用「{app}」应用（WebCoder 的 MCP 工具）完成下面的任务。"
+        "项目：{alias}（{device} 上的 {root}）。调用工具时传 project=\"{alias}\"，路径相对于项目根目录。\n\n{prompt}")
 STDIN_HINT_AFTER = 3.0  # seconds of reading a pipe before saying so
 
 
@@ -357,6 +361,35 @@ def ensure_project(client: HubClient, root: Path, alias: str | None, changed: bo
             raise
 
 
+@contextlib.contextmanager
+def terminate_as_interrupt():
+    """SIGTERM (what a supervisor such as a review service sends to stop a run) is handled like Ctrl+C: the task
+    is cancelled in the browser too, instead of ChatGPT working on after webc is gone."""
+    if not hasattr(signal, "SIGTERM") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, interrupt)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def remove_allowed(config, real: str) -> None:
+    """Take back a folder this run added to the agent's allowed folders (under the same lock as adding)."""
+    from webcoder.agent.config import AgentConfig
+
+    with locked(Path(config.path)):
+        fresh = AgentConfig.load(config.path)
+        fresh.allowed_roots = [root for root in fresh.allowed_roots if root != real]
+        fresh.save()
+    config.allowed_roots = fresh.allowed_roots
+
+
 def run_task(args, settings: dict) -> int:
     out = Output(quiet=args.quiet)
     prompt = " ".join(args.prompt).strip()
@@ -369,21 +402,43 @@ def run_task(args, settings: dict) -> int:
     if too_broad(root) and not args.allow_broad:
         raise SystemExit(f"{root} 是整个磁盘或用户目录，范围太大。进入具体的项目文件夹再运行，或加 --allow-broad")
     client = HubClient.from_config(config)
-    changed = ensure_allowed(config, root, out)
-    project = ensure_project(client, root, args.alias, changed)
+    with terminate_as_interrupt():
+        changed = ensure_allowed(config, root, out)
+        project = None
+        try:
+            project = ensure_project(client, root, args.alias, changed)
+            return follow_task(args, settings, out, config, client, root, project, prompt)
+        finally:
+            if args.ephemeral:
+                clean_up(client, config, root, project, changed, out)
+
+
+def clean_up(client: HubClient, config, root: Path, project: dict | None, changed: bool, out) -> None:
+    """--ephemeral: take back what this run set up (the project it created, the folder it allowed)."""
+    if project and project.get("created"):
+        try:
+            client.post("/api/cli/project/remove", {"project_id": project["id"]}, timeout=30)
+        except HubError as exc:
+            out.warn(f"没能删除本次创建的项目 {project['alias']}：{exc.code}: {exc.message}")
+    if changed:
+        remove_allowed(config, os.path.realpath(str(root)))
+
+
+def follow_task(args, settings: dict, out, config, client: HubClient, root: Path, project: dict, prompt: str) -> int:
     out.note(f"WebCoder · 项目 {project['alias']} · {project['root']}"
              + ("（新建项目）" if project.get("created") else ""))
     for warning in project.get("warnings") or []:
         out.warn(warning)
 
     key = session_key(config, root)
-    session = None if args.new else _read_json(home() / "sessions.json").get(key)
+    remember = not args.ephemeral  # a one-off run neither continues nor leaves a conversation behind
+    session = None if args.new or not remember else _read_json(home() / "sessions.json").get(key)
     model = args.model or (session or {}).get("model") or settings.get("model")
     if session and args.model and session.get("model") != args.model:
         out.note(f"· 指定了不同的模型（{args.model}），开一个新会话")
         session = None
     app = None if args.no_app else args.app or settings.get("app") or DEFAULTS["app"]
-    template = PLAIN if app is None else FOLLOW_UP if session else NEW_CONVERSATION
+    template = (PLAIN if app is None else FOLLOW_UP if session else BARE if args.bare else NEW_CONVERSATION)
     message = template.format(app=app, alias=project["alias"], root=project["root"],
                               device=socket.gethostname() or "这台电脑", prompt=prompt)
     payload = {"project_id": project["id"], "prompt": message, "conversation": (session or {}).get("conversation"),
@@ -422,7 +477,7 @@ def run_task(args, settings: dict) -> int:
         return 130
 
     conversation = result.get("url") or state.get("conversation")
-    if conversation:
+    if conversation and remember:
         record = {"conversation": conversation, "model": model, "project": project["alias"], "updated": time.time()}
         update_sessions(lambda sessions: sessions.__setitem__(key, record))
     if result["type"] == "done":
@@ -796,6 +851,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("--timeout", type=int, default=3600, help="最长等待秒数（默认 3600）")
         parser.add_argument("--allow-broad", action="store_true", help="允许把整个磁盘或用户目录当作项目")
         parser.add_argument("-q", "--quiet", action="store_true", help="只输出最终回复")
+        parser.add_argument("--bare", action="store_true",
+                            help="任务自带完整说明（例如代码审查服务的提示词）：只告诉 ChatGPT 用哪个应用和项目，"
+                                 "不加默认的编码任务说明")
+        parser.add_argument("--ephemeral", action="store_true",
+                            help="一次性运行：总是开新会话、不记住会话；结束后删除本次新建的项目，收回本次自动加入的"
+                                 "文件夹（给每次都在新文件夹里运行的服务用）")
         args = parser.parse_args(argv)
         settings = load_settings()
 
@@ -806,6 +867,9 @@ def main(argv: list[str] | None = None) -> int:
     except HubError as exc:
         print(f"✗ {exc.code}: {exc.message}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:  # Ctrl+C or SIGTERM before a task was submitted
+        print("✗ 已取消", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

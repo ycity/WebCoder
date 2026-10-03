@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
 import threading
 import time
 import zipfile
@@ -17,6 +18,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 from websockets.sync.client import connect
 
 from webcoder.agent.__main__ import pair_device
+from webcoder.agent.config import AgentConfig
 from webcoder.cli import __main__ as cli
 from webcoder.cli.client import HubClient, HubError
 from webcoder.common.channel import SIGNATURE_HEADER, request_signature
@@ -430,6 +432,76 @@ def test_webcoder_runs_a_task_end_to_end(hub, device, tmp_path, monkeypatch, cap
 
     assert cli.main(["--agent-config", str(config.path), "forget"]) == 0
     assert "已忘记" in capsys.readouterr().out
+
+
+def test_an_ephemeral_bare_run_leaves_nothing_behind(hub, start_agent, tmp_path, monkeypatch, capsys):
+    """What a review service runs in a fresh checkout each time: its own prompt, then no project, folder or
+    conversation left over."""
+    _, config = start_agent("box", tmp_path / "allowed")
+    monkeypatch.setenv("WEBCODER_HOME", str(tmp_path / "webcoder-home"))
+    folder = tmp_path / "tasks" / "7" / "repo"
+    (folder / ".git").mkdir(parents=True)
+    monkeypatch.chdir(folder)
+    browser, _ = link_browser(hub, config)
+    seen = []
+
+    def play():
+        job = browser.recv(timeout=30)["job"]
+        seen.append(job)
+        browser.event(job["id"], type="done", text="reviewed", url="https://chatgpt.com/c/review-7")
+
+    player = threading.Thread(target=play, daemon=True)
+    player.start()
+    assert cli.main(["--agent-config", str(config.path), "--bare", "--ephemeral", "--alias", "dolrev-7",
+                     "-n", "Review this change."]) == 0
+    player.join(10)
+    assert capsys.readouterr().out == "reviewed\n"
+    prompt = seen[0]["prompt"]
+    assert 'project="dolrev-7"' in prompt and prompt.endswith("\n\nReview this change.")
+    assert "edit_file" not in prompt  # no coding-task instructions of its own
+    assert all(row["alias"] != "dolrev-7" for row in hub.panel.get("/api/projects").json()["projects"])
+    assert str(folder.resolve()) not in AgentConfig.load(config.path).allowed_roots
+    assert not (tmp_path / "webcoder-home" / "sessions.json").exists()
+
+    client = client_for(config)  # only a project webc made can be taken back this way
+    made = client.post("/api/cli/project", {"root": str(tmp_path / "allowed")})
+    hub.panel.delete(f"/api/projects/{made['id']}").raise_for_status()
+    panel_made = hub.panel.post("/api/projects", json={"alias": "kept", "device_id": config.device_id,
+                                                        "root": str(tmp_path / "allowed")}).json()
+    with pytest.raises(HubError) as refused:
+        client.post("/api/cli/project/remove", {"project_id": panel_made["id"]})
+    assert refused.value.code == "NOT_CLI_PROJECT"
+    with pytest.raises(HubError) as missing:
+        client.post("/api/cli/project/remove", {"project_id": "prj_nothere"})
+    assert missing.value.code == "PROJECT_NOT_FOUND"
+
+
+def test_sigterm_cancels_the_task_in_the_browser(hub, device, tmp_path, monkeypatch, capsys):
+    """A supervisor stops webc with SIGTERM: the browser must stop too, not let ChatGPT work on unseen."""
+    _, config = device
+    monkeypatch.setenv("WEBCODER_HOME", str(tmp_path / "webcoder-home"))
+    folder = tmp_path / "code" / "svc"
+    folder.mkdir(parents=True)
+    monkeypatch.chdir(folder)
+    browser, _ = link_browser(hub, config)
+    cancelled = []
+
+    def play():
+        job = browser.recv(timeout=30)["job"]
+        browser.event(job["id"], type="status", text="working")
+        time.sleep(0.5)
+        signal.raise_signal(signal.SIGTERM)
+        message = browser.recv(timeout=30)
+        cancelled.append(message)
+        browser.event(job["id"], type="cancelled")
+
+    player = threading.Thread(target=play, daemon=True)
+    player.start()
+    assert cli.main(["--agent-config", str(config.path), "keep going"]) == 130
+    player.join(30)
+    assert cancelled and cancelled[0]["t"] == "cancel"
+    assert "已取消" in capsys.readouterr().err
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL  # restored for whatever runs next
 
 
 def test_webcoder_adds_the_folder_to_the_agent(hub, start_agent, tmp_path, monkeypatch):

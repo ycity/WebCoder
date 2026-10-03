@@ -95,6 +95,10 @@ class RevokeBody(BaseModel):
     id: str = Field(min_length=1, max_length=64)
 
 
+class RemoveProjectBody(BaseModel):
+    project_id: str = Field(min_length=1, max_length=64)
+
+
 class EmptyBody(BaseModel):
     pass
 
@@ -631,6 +635,23 @@ def make_cli_router(rt) -> APIRouter:
                        device["user_id"]))
         audit(device, "project.created", f"{alias} → {device['name']}:{root}")
         return project_view(store.one("SELECT * FROM projects WHERE id=?", (project_id,)), True)
+
+    @router.post("/project/remove")
+    async def remove_project(request: Request):
+        """`webc --ephemeral` takes back the project its run created. Only a project the CLI made on this device:
+        one set up in the panel, or another device's, stays."""
+        device, body = await signed(request, RemoveProjectBody)
+        row = store.one("SELECT * FROM projects WHERE id=? AND device_id=?", (body.project_id, device["id"]))
+        if not row:
+            raise ApiError(404, "PROJECT_NOT_FOUND", "No such project on this device")
+        if row["description"] != "webcoder":
+            raise ApiError(409, "NOT_CLI_PROJECT", f"The project {row['alias']} was not created by webc; remove it in "
+                           "the hub panel")
+        if any(job.active and job.project["id"] == row["id"] for job in relay.jobs.values()):
+            raise ApiError(409, "PROJECT_BUSY", f"A task is still running in the project {row['alias']}")
+        store.execute("DELETE FROM projects WHERE id=?", (row["id"],))
+        audit(device, "project.deleted", f"{row['alias']} → {device['name']}:{row['root']}")
+        return {"ok": True}
 
     @router.post("/browser-code")
     async def browser_code(request: Request):
