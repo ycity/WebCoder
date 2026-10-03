@@ -57,7 +57,7 @@ docker compose -f compose.yml -f deploy/compose.https.yml up -d   # Caddy 自动
 
 ### 2. 接入设备（Agent）
 
-面板 →「设备」→「添加设备」：填名称、选系统（Windows / macOS / Linux）、**每行填一个允许 AI 访问的文件夹**（只用手机控制或 SSH 时可以先不填），按需勾选「整台设备只读」「开机自动运行」，然后把生成的**一条命令**复制到那台电脑上运行（Windows 用 PowerShell，macOS / Linux 用终端，需要 Python 3.10+，不需要管理员权限）：
+面板 →「设备」→「添加设备」：填名称、选系统（Windows / macOS / Linux）、**每行填一个允许 AI 访问的文件夹**（只用手机控制或 SSH 时可以先不填），按需勾选「整台设备只读」「开机自动运行」，然后把生成的**一条命令**复制到那台电脑上运行（Windows 用 PowerShell，macOS / Linux 用终端，需要 Python 3.10+，不需要管理员权限；macOS 自带的是 3.9，先用 Homebrew 装一个，例如 `brew install python@3.13`）：
 
 ```powershell
 & ([scriptblock]::Create((irm 'https://你的hub/downloads/install-agent.ps1'))) -Hub 'https://你的hub' -Code 'ABCD-EFGH' -Root 'D:\code','E:\notes'
@@ -67,7 +67,7 @@ docker compose -f compose.yml -f deploy/compose.https.yml up -d   # Caddy 自动
 bash -c "$(curl -fsSL 'https://你的hub/downloads/install-agent.sh' || echo 'exit 1')" install-agent.sh --hub 'https://你的hub' --code 'ABCD-EFGH' --root '/home/me/code'
 ```
 
-它会在 `~/.webcoder-agent` 建独立的 Python 虚拟环境 → 从 Hub 安装 Agent → 用一次性配对码（15 分钟有效）配对 → 设置允许的文件夹（不存在就创建）→ 注册开机自动运行（Windows 计划任务「WebCoder Agent」、macOS launchd、Linux systemd 用户服务），并确认已连上 Hub。重新运行同一类命令就是升级 / 重新配对。文件夹、只读和手机控制每次都按命令里的设置重新应用：命令里没有的文件夹会被收回。SSH 服务器列表在重新配对同一台设备时保留；配对成另一台设备（例如删掉后重新添加）时，不会继承旧设备的文件夹、手机和服务器权限。
+它会在 `~/.webcoder-agent` 建独立的 Python 虚拟环境 → 从 Hub 安装 Agent → 用一次性配对码（15 分钟有效）配对 → 设置允许的文件夹（不存在就创建）→ 注册开机自动运行（Windows 计划任务「WebCoder Agent」、macOS launchd、Linux systemd 用户服务），并确认已连上 Hub。它还把 `webc`、`webcoder-bridge` 和 `webcoder-agent` 放进 PATH（Windows：`~/.webcoder-agent/bin`；macOS / Linux：`~/.local/bin`，这个目录要在 PATH 里，安装脚本会提示），所以提示信息里的 `webcoder-agent roots remove …` 之类的设置命令可以直接运行。重新运行同一类命令就是升级 / 重新配对。文件夹、只读和手机控制每次都按命令里的设置重新应用：命令里没有的文件夹会被收回。SSH 服务器列表在重新配对同一台设备时保留；配对成另一台设备（例如删掉后重新添加）时，不会继承旧设备的文件夹、手机和服务器权限。
 
 - **文件夹只能在设备上改**（Hub 无权扩大 Agent 的访问范围）：面板里点「修改设置」会生成一条命令，在那台电脑上运行即可，正在运行的 Agent 几秒内自动生效。也可以直接用 `python -m webcoder.agent roots list|add|remove|set`。
 - `python -m webcoder.agent read-only on` 可把整台设备切成只读，AI 只能看、不能改：文件和 git 只能读，不运行本机命令行工具；手机只能列出、读屏幕结构、看日志和设备信息（不能操作，截图也不能存进项目）；SSH 只能列出服务器，不执行命令也不传文件。
@@ -387,7 +387,7 @@ webc "任务" ──签名请求──▶ Hub ──WebSocket──▶ 浏览器
 
 **准备（一次）：**
 
-1. 这台电脑已按「接入设备」装好 Agent。安装命令会顺带把 `webc` 放进 PATH（Windows：`~/.webcoder-agent/bin`；macOS / Linux：`~/.local/bin`），新开的终端里生效。
+1. 这台电脑已按「接入设备」装好 Agent。安装命令会顺带把 `webc`（还有 `webcoder-agent`）放进 PATH（Windows：`~/.webcoder-agent/bin`；macOS / Linux：`~/.local/bin`），新开的终端里生效。
 2. ChatGPT 里已经添加 WebCoder 应用（见下文「用 ChatGPT 网页版修改本地文件」），授权时项目选「全部项目」，`webc` 新建的项目才自动可用；授权只包含部分项目时，`webc` 会提示。
 3. 安装扩展：下载 `https://你的hub/downloads/webcoder-extension.zip` 并解压。Edge 打开 `edge://extensions`（Chrome 打开 `chrome://extensions`），打开「开发人员模式」，点「加载解压缩的扩展」，选择解压出来的文件夹。
 4. 连接扩展：运行 `webc link`，把它显示的 Hub 地址和连接码填进扩展弹窗（点工具栏上的 WebCoder 图标）。终端显示「已连接」就好了。
@@ -410,6 +410,7 @@ webc forget                              # 忘记本文件夹的会话，下次�
 - **会话**：每个文件夹记住一个 ChatGPT 会话（存在 `~/.webcoder/sessions.json`），之后的任务都接着这个会话发。`-n` 或 `webc forget` 开新会话；用 `-m` 指定了和上次不同的模型，也会开新会话。
 - **网页上发生什么**：扩展在后台标签页里打开会话，不抢焦点。每次都先在输入框里 `@WebCoder` 选上应用（菜单里名字必须完全一致），再输入任务并发送。扩展自己开的标签页会复用，空闲的最多保留 3 个。标签页里有你自己输入还没发出去的文字，或者选着别的应用时，扩展不会动这个标签页（不导航、不刷新、不关闭、不代发），改用另一个标签页。
 - **批准**：默认自动批准 WebCoder 工具的确认，并勾选「本对话记住」。只有确定是 WebCoder 的确认卡片才会被点击：卡片上的应用图标属于这个应用（按应用 ID 判断），或者卡片标题以应用的完整名字开头，而且没有和名字相近的其他应用（比如「WebCoder Test」）混淆。工具名、参数和正文里出现的「WebCoder」都不算数。判断不了的确认卡片留给你在浏览器里处理，终端会提示，任务等你处理完再结束。登录、付费之类的其他弹窗一概不碰；页面被弹窗挡住时直接报错。`--confirm` 或 `webc config auto_approve false` 可以关掉自动批准：这时扩展会先刷新会话页面，因为 ChatGPT 刷新后会忘掉「本对话记住」的批准（这一点按 OpenAI 文档实现，还没在真实账号上验证）。
+- **标准输入**：stdin 是管道或文件时，`webc` 读到结束才发任务，读到的内容附在任务后面。`ssh 主机 'webc "…"'` 这类调用会交给它一个没人关闭的管道，3 秒后它会提示还在等输入；这时加 `--no-stdin`（或 `</dev/null`）。
 - **输出**：回复实时写到 stdout，代码块还原成 Markdown。进度和工具调用写到 stderr，工具调用来自 Hub 的审计记录，精确到文件。结束时列出改动过的文件和会话链接。`-q` 只输出最终回复。按 Ctrl+C 取消任务，浏览器里的生成也会停下。
 
 **安全：**
@@ -521,7 +522,7 @@ python -m venv .venv && .venv/Scripts/python -m pip install -e ".[hub,dev]"    #
 
 测试（502 个）使用真实的 Hub（uvicorn）和真实的 Agent（WebSocket），覆盖：webc（设备签名：重放、篡改、过期、停用设备；文件夹自动成为项目；扩展的一次性连接码、令牌、撤销、网页来源被拒；任务中继、工具调用回传、取消、扩展断线与重启；命令行从提交到输出的完整流程；扩展的页面脚本在仿 chatgpt.com 页面上用 Chromium headless shell 验证 @应用、自动批准与「记住」、只点自己的确认按钮、回复还原成 Markdown）、路径与权限边界、编辑语义、加密通道、MCP 协议细节、OAuth 全流程（按 ChatGPT 的方式：动态注册、空 scope、以域名作 resource、`iss`、`_meta` 重新授权；以及 Codex 的回环回调与刷新令牌轮换）、多用户隔离（设备 / 项目 / 令牌 / OAuth / 审计）、邀请与重置链接、停用与删除用户、单用户数据库自动迁移、一键安装命令（在真实的 PowerShell 和 bash 里验证含空格、引号和中文的文件夹路径原样传给安装脚本）、运行中的 Agent 热加载文件夹与重新配对、删除设备后 Agent 自动退役（在线 / 离线、伪造的删除通知无效、只清理自己的自启项）、单实例锁、手机控制（用假的 adb / hdc 验证参数转义、权限、项目边界和 MCP 工具）、SSH（用假的 ssh 验证主机白名单、选项注入防护、非交互选项、超时、上传不覆盖、下载进项目、按主机选电脑和审计）、git（用真实仓库验证钩子不执行、参数不能变成选项、机密不进 diff / 暂存 / clean、丢弃改动前的快照、推送到本地裸仓库、冲突处理和只读设备）、在对话里显示图片（用真实浏览器验证 MCP Apps 组件的握手和渲染）、skills（只读、只开放 skills 文件夹、开关与令牌范围）、本机命令行工具（禁止清单、参数原样传递、用真实 node 验证 npm 包装脚本不经过 cmd.exe、GBK 输出解码、授权与审计）、跨设备复制、stdio 桥接（含 `--token-file`）、插件包（用官方 Agent Plugins Schema 校验）、官方 MCP Python SDK 客户端、协作中心（移植自 CodePier 的服务、事件投递、加入、聊天室、目标与监控测试；MCP Events 2026-07-28 协议契约；dot 聊天「加入码 → 四个订阅 → 测试事件真实投递 → 确认收件」的端到端流程；通过真实 Agent 执行目标步骤；协作中心页面的 Playwright 测试）、以及用 Playwright 驱动的面板 UI 冒烟测试（需要安装专用 Chromium headless shell，否则自动跳过）。
 
-Windows 一键安装脚本已在 Windows 11 + Windows PowerShell 5.1 上实跑：全新安装、重复运行（升级 + 重新配对）、计划任务开机自启与停止、删除设备后自动移除计划任务、彻底卸载命令、安装失败时恢复原 Agent。Linux 脚本在 Debian 12 上对正式 Hub 实跑过（不含自启部分）；macOS 脚本只做了语法和参数传递测试。
+Windows 一键安装脚本已在 Windows 11 + Windows PowerShell 5.1 上实跑：全新安装、重复运行（升级 + 重新配对）、计划任务开机自启与停止、删除设备后自动移除计划任务、彻底卸载命令、安装失败时恢复原 Agent。Linux 脚本在 Debian 12 上对正式 Hub 实跑过（不含自启部分）。macOS 脚本在 macOS 26.5（Apple 芯片，Homebrew Python 3.13）上对正式 Hub 实跑过：全新安装、重复运行（升级 + 重新配对）、launchd 登录自启并连上 Hub、`webc` 与 `webcoder-agent` 进入 PATH，以及从 Mac 上的项目文件夹用 `webc` 发任务、经另一台电脑浏览器里的扩展交给 ChatGPT 读取文件的完整流程。
 
 真实客户端验证：Codex CLI 0.149.1（`codex exec` 调用 `list_projects` → `read_file` → `edit_file`）。webc 在 Edge 154 + 真实 chatgpt.com 上跑通了：CLI → Hub → 扩展 → 后台标签页输入、发送、流式读取回复（代码块、列表、表格还原成 Markdown）→ 终端输出；标签页复用；管道输入；登录后新会话、同一会话的追问，以及在 `@` 菜单里选中 WebCoder 应用并完成一次只读的工具调用。写操作确认的自动批准和 `?model=` 选模型，还没有在真实账号上验证。ChatGPT 网页版的公网 HTTPS + OAuth 路径已用真实账号验证：动态注册、授权、读写项目文件，以及调用手机工具时按需重新授权（加上手机权限），之后用真机（安卓）完成列出手机、读屏幕和截图。Secure MCP Tunnel 路径用 tunnel-client 0.0.16 的本地控制面（`dev proxy`）走通了 tunnel-client → 桥接程序 → Hub → Agent 的读写，经 OpenAI 隧道服务和 ChatGPT 的一段尚未用真实账号验证。
 

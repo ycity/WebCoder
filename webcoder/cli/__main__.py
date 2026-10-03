@@ -19,8 +19,10 @@ import re
 import socket
 import stat
 import sys
+import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from webcoder import VERSION
@@ -42,6 +44,7 @@ NEW_CONVERSATION = """请使用「{app}」应用（WebCoder 的 MCP 工具）完
 FOLLOW_UP = """（项目 {alias}，继续用「{app}」应用的工具操作文件）
 {prompt}"""
 PLAIN = "{prompt}"  # --no-app: the task as typed, no app attached
+STDIN_HINT_AFTER = 3.0  # seconds of reading a pipe before saying so
 
 
 def home() -> Path:
@@ -103,9 +106,11 @@ def update_sessions(change) -> None:
         _write_json(path, sessions)
 
 
-def piped_input() -> str:
+def piped_input(waiting=None) -> str:
     """What was piped in (`git diff | webcoder "..."`): only from a pipe or a file, never a console, so a
-    terminal (or an empty, never-closed stdin of some launcher) does not make webcoder wait."""
+    terminal (or an empty, never-closed stdin of some launcher) does not make webcoder wait. A pipe is read to its
+    end; when that takes a while, `waiting()` is called once: a pipe nobody closes (`ssh host 'webc "..."'`
+    hands one over) would otherwise look like a hang."""
     try:
         if sys.stdin is None or sys.stdin.isatty():
             return ""
@@ -114,7 +119,20 @@ def piped_input() -> str:
         return ""
     if not (stat.S_ISFIFO(mode) or stat.S_ISREG(mode)):
         return ""
-    return sys.stdin.read()
+    if waiting is None or not stat.S_ISFIFO(mode):
+        return sys.stdin.read()
+    timer = threading.Timer(STDIN_HINT_AFTER, waiting)
+    timer.daemon = True
+    timer.start()
+    try:
+        return sys.stdin.read()
+    finally:
+        timer.cancel()
+
+
+def stdin_hint(out) -> Callable[[], None]:
+    return lambda: out.warn("还在读取标准输入，读到结束才会发出任务（通过管道传入的内容会附在任务后面）。"
+                            "没有要传入的内容时加 --no-stdin，例如通过 ssh 运行时")
 
 
 def with_context(prompt: str, piped: str) -> str:
@@ -315,6 +333,15 @@ def load_agent(path: Path | None):
     return config
 
 
+def agent_service(platform: str = sys.platform) -> str:
+    """Where the installer set the agent up to run, and how to look at it."""
+    if platform == "win32":
+        return "Windows 计划任务「WebCoder Agent」"
+    if platform == "darwin":
+        return "launchd 服务 com.webcoder.agent，查看：launchctl print gui/$(id -u)/com.webcoder.agent"
+    return "systemd 用户服务 webcoder-agent，查看：systemctl --user status webcoder-agent"
+
+
 def ensure_project(client: HubClient, root: Path, alias: str | None, changed: bool) -> dict:
     deadline = time.monotonic() + (15 if changed else 0)
     while True:
@@ -326,14 +353,15 @@ def ensure_project(client: HubClient, root: Path, alias: str | None, changed: bo
                 continue
             if exc.code == "DEVICE_OFFLINE":
                 raise SystemExit("这台电脑的 Agent 没有连上 Hub：确认 webcoder-agent 正在运行"
-                                 "（Windows 计划任务「WebCoder Agent」）") from None
+                                 f"（{agent_service()}）") from None
             raise
 
 
 def run_task(args, settings: dict) -> int:
     out = Output(quiet=args.quiet)
     prompt = " ".join(args.prompt).strip()
-    prompt = with_context("" if prompt == "-" else prompt, "" if args.no_stdin else piped_input()).strip()
+    piped = "" if args.no_stdin else piped_input(stdin_hint(out))
+    prompt = with_context("" if prompt == "-" else prompt, piped).strip()
     if not prompt:
         raise SystemExit("缺少任务内容：webc \"要做的事\"（或从标准输入传入）")
     config = load_agent(args.agent_config)
@@ -616,7 +644,8 @@ def dot_test(client: HubClient) -> int:
 def dot_ask(args, client: HubClient, config, words: list[str]) -> int:
     out = Output(quiet=args.quiet)
     prompt = " ".join(words).strip()
-    prompt = with_context("" if prompt == "-" else prompt, "" if args.no_stdin else piped_input()).strip()
+    piped = "" if args.no_stdin else piped_input(stdin_hint(out))
+    prompt = with_context("" if prompt == "-" else prompt, piped).strip()
     if not prompt:
         raise SystemExit("缺少要对 dot 说的话：webc dot \"要说的话\"（或从标准输入传入）")
     if len(prompt) > DOT_MAX_TEXT:

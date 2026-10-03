@@ -94,14 +94,17 @@ fi
 step "安装 WebCoder Agent"
 "$PY" -m pip install --disable-pip-version-check --quiet --upgrade "$HUB/downloads/webcoder-agent.zip" </dev/null
 
-# `webc` (tasks for ChatGPT on the web, from a project folder) and `webcoder-bridge` (the stdio server behind
-# Secure MCP Tunnel) on PATH, without the venv's python with them.
+# `webc` (tasks for ChatGPT on the web, from a project folder), `webcoder-bridge` (the stdio server behind
+# Secure MCP Tunnel) and `webcoder-agent` (the settings commands its messages suggest, e.g. `roots remove`) on
+# PATH, without the venv's python with them.
 if [ -x "$VENV/bin/webc" ]; then
-  mkdir -p "$HOME/.local/bin" && ln -sf "$VENV/bin/webc" "$HOME/.local/bin/webc"
-  [ -x "$VENV/bin/webcoder-bridge" ] && ln -sf "$VENV/bin/webcoder-bridge" "$HOME/.local/bin/webcoder-bridge"
+  mkdir -p "$HOME/.local/bin"
+  for name in webc webcoder-bridge webcoder-agent; do
+    if [ -x "$VENV/bin/$name" ]; then ln -sf "$VENV/bin/$name" "$HOME/.local/bin/$name"; fi
+  done
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
-    *) echo "提示：把 ~/.local/bin 加入 PATH 后就能在任意文件夹运行 webc，Secure MCP Tunnel 也要靠它找到 webcoder-bridge" ;;
+    *) echo "提示：把 ~/.local/bin 加入 PATH 后就能在任意文件夹运行 webc 和 webcoder-agent，Secure MCP Tunnel 也要靠它找到 webcoder-bridge" ;;
   esac
 fi
 

@@ -480,6 +480,34 @@ def test_piped_input_is_attached_to_the_task(tmp_path, monkeypatch):
     assert cli.piped_input() == ""
 
 
+def test_a_slow_pipe_is_announced_once(monkeypatch):
+    """`ssh host 'webc "..."'` hands webc a pipe nobody closes: say what it waits for instead of hanging silently."""
+    monkeypatch.setattr(cli, "STDIN_HINT_AFTER", 0.2)
+    for delay, hinted in ((0.0, 0), (1.0, 1)):
+        read_end, write_end = os.pipe()
+        calls = []
+
+        def feed(write_end=write_end, delay=delay):
+            time.sleep(delay)
+            os.write(write_end, b"late diff\n")
+            os.close(write_end)
+
+        with os.fdopen(read_end, encoding="utf-8") as handle:
+            monkeypatch.setattr(cli.sys, "stdin", handle)
+            feeder = threading.Thread(target=feed)
+            feeder.start()
+            assert cli.piped_input(lambda calls=calls: calls.append(1)) == "late diff\n"
+            feeder.join(10)
+        time.sleep(0.3)  # a timer that was not cancelled would fire now
+        assert len(calls) == hinted, delay
+
+
+def test_agent_service_hint_names_the_platforms_autostart():
+    assert "计划任务「WebCoder Agent」" in cli.agent_service("win32")
+    assert "launchctl print gui/$(id -u)/com.webcoder.agent" in cli.agent_service("darwin")
+    assert "systemctl --user status webcoder-agent" in cli.agent_service("linux")
+
+
 def test_sessions_from_concurrent_tasks_are_all_kept(tmp_path, monkeypatch):
     monkeypatch.setenv("WEBCODER_HOME", str(tmp_path / "home"))
     threads = [threading.Thread(target=cli.update_sessions,

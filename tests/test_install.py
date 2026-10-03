@@ -162,6 +162,25 @@ def test_launchd_plist_paths_are_xml_escaped():
     assert "<string>$PY</string>" not in script and '<string>$(xml "$PY")</string>' in script
 
 
+def test_installers_put_the_cli_programs_on_path(tmp_path):
+    """webc, webcoder-bridge and webcoder-agent (whose commands the messages suggest) end up on PATH."""
+    ps1 = (INSTALLERS / "install-agent.ps1").read_text(encoding="utf-8")
+    assert "foreach ($name in 'webc.exe', 'webcoder-bridge.exe', 'webcoder-agent.exe') {" in ps1
+    script = (INSTALLERS / "install-agent.sh").read_text(encoding="utf-8")
+    block = re.search(r'^if \[ -x "\$VENV/bin/webc" \]; then\n.*?^fi\n', script, re.S | re.M).group(0)
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    for name in ("webc", "webcoder-agent"):  # no webcoder-bridge: a missing one is skipped, not an error
+        (venv / "bin" / name).write_text("#!/bin/sh\necho ran\n", encoding="utf-8", newline="\n")
+        (venv / "bin" / name).chmod(0o755)
+    run = subprocess.run([bash(), "-c", f"set -euo pipefail\nVENV={sh_quote(venv.as_posix())}\n{block}echo done"],
+                         capture_output=True, timeout=60, env={**os.environ, "HOME": tmp_path.as_posix()})
+    assert run.returncode == 0 and run.stdout.decode().strip().endswith("done"), run.stderr
+    assert "webcoder-agent" in run.stdout.decode()  # not on PATH here: the hint names it too
+    linked = tmp_path / ".local" / "bin"
+    assert sorted(path.name for path in linked.iterdir()) == ["webc", "webcoder-agent"]
+
+
 def test_installer_scripts_parse():
     # Parsed from UTF-8 text, the way Invoke-RestMethod hands it to [scriptblock]::Create.
     result = run_powershell(

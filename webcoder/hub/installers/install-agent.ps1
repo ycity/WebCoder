@@ -80,14 +80,15 @@ try {
     & $Python -m pip install --disable-pip-version-check --quiet --upgrade "$Hub/downloads/webcoder-agent.zip"
     if ($LASTEXITCODE -ne 0) { throw 'pip 安装失败（见上方输出）。国内网络可先设置 PIP_INDEX_URL 使用镜像源。' }
 
-    # `webc` (tasks for ChatGPT on the web, from a project folder) and `webcoder-bridge` (the stdio server behind
-    # Secure MCP Tunnel) on the user's PATH: copies of the launchers pip made (they name the venv's Python by full
-    # path) in a folder of their own, so the venv's python.exe stays off PATH. A running one keeps the old copy.
+    # `webc` (tasks for ChatGPT on the web, from a project folder), `webcoder-bridge` (the stdio server behind
+    # Secure MCP Tunnel) and `webcoder-agent` (the settings commands its messages suggest, e.g. `roots remove`) on
+    # the user's PATH: copies of the launchers pip made (they name the venv's Python by full path) in a folder of
+    # their own, so the venv's python.exe stays off PATH. A running one keeps the old copy.
     $Launcher = Join-Path $Venv 'Scripts\webc.exe'
     if (Test-Path $Launcher) {
         $Bin = Join-Path $AgentHome 'bin'
         New-Item -ItemType Directory -Force -Path $Bin | Out-Null
-        foreach ($name in 'webc.exe', 'webcoder-bridge.exe') {
+        foreach ($name in 'webc.exe', 'webcoder-bridge.exe', 'webcoder-agent.exe') {
             $made = Join-Path $Venv "Scripts\$name"
             if (Test-Path $made) { Copy-Item -Force $made (Join-Path $Bin $name) -ErrorAction SilentlyContinue }
         }
