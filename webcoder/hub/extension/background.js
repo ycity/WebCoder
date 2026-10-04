@@ -22,6 +22,11 @@ class JobError extends Error {
   constructor(code, message) { super(message); this.code = code; }
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// A tab the browser put to sleep (Edge's sleeping tabs) never runs what is injected into it, and the call never
+// settles: anything that waits on a tab gets a time limit.
+const bounded = (promise, ms) => Promise.race([promise.catch(() => {}), sleep(ms)]);
+const injectContent = (tabId) => bounded(chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }),
+  3000);
 
 // ---------------------------------------------------------------- status shown in the popup and the badge
 function setStatus(state, detail = '') {
@@ -278,7 +283,7 @@ async function ensureContent(tabId) {
       if (answer && answer.ok) return;
     } catch { /* not there yet */ }
     if (attempt === 1) {  // a tab opened before the extension was installed or reloaded
-      await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
+      await injectContent(tabId);
     }
     await sleep(700);
   }
@@ -335,15 +340,15 @@ function adoptTab(tabId) {
 
 // Whether the tab may hold unsent text the person typed, asked before navigating, reloading or closing it (which
 // would lose it). Anything short of the page saying "no" counts as yes: a discarded tab, one still loading, one
-// that does not answer is left alone.
+// asleep, one that does not answer is left alone.
 async function mayHoldDraft(tab) {
-  if (tab.discarded) return true;
+  if (tab.discarded || tab.frozen) return true;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const answer = await tabCall(tab.id, { cmd: 'draft' }, 3000);
       if (answer && answer.ok) return answer.draft !== false;  // null: the page could not tell
     } catch { /* no content script there yet */ }
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }).catch(() => {});
+    await injectContent(tab.id);
   }
   return true;
 }
