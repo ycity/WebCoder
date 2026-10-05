@@ -47,6 +47,7 @@ FOLLOW_UP = """（项目 {alias}，继续用「{app}」应用的工具操作文�
 PLAIN = "{prompt}"  # --no-app: the task as typed, no app attached
 # --bare: the task brings its own instructions (e.g. a review service's prompt); only say which app and project
 BARE = ("请使用「{app}」应用（WebCoder 的 MCP 工具）完成下面的任务。"
+        "这个对话里可以调用它的工具（list_projects、read_file、git_diff 等）；不确定时先调用 list_projects 确认。"
         "项目：{alias}（{device} 上的 {root}）。调用工具时传 project=\"{alias}\"，路径相对于项目根目录。\n\n{prompt}")
 STDIN_HINT_AFTER = 3.0  # seconds of reading a pipe before saying so
 

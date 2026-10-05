@@ -458,6 +458,7 @@ def test_an_ephemeral_bare_run_leaves_nothing_behind(hub, start_agent, tmp_path,
     assert capsys.readouterr().out == "reviewed\n"
     prompt = seen[0]["prompt"]
     assert 'project="dolrev-7"' in prompt and prompt.endswith("\n\nReview this change.")
+    assert "list_projects" in prompt  # says the app's tools are there: one review run was answered "no such tool"
     assert "edit_file" not in prompt  # no coding-task instructions of its own
     assert all(row["alias"] != "dolrev-7" for row in hub.panel.get("/api/projects").json()["projects"])
     assert str(folder.resolve()) not in AgentConfig.load(config.path).allowed_roots
