@@ -547,7 +547,9 @@ async function follow(job, run, tabId, emit) {
     calm = state.started && !busy && state.complete ? calm + 1 : 0;
     if (calm >= 2) return { text, url };
     if (!state.started && Date.now() - waitingSince > 180000) {
-      throw new JobError('NO_REPLY', 'ChatGPT 三分钟内没有开始回复（看一下浏览器里的那个标签页）');
+      const shown = (state.buttons || []).join('、');
+      throw new JobError('NO_REPLY', 'ChatGPT 三分钟内没有开始回复（看一下浏览器里的那个标签页' +
+        (shown ? `；页面上有按钮：${shown}` : '') + (state.blocked ? `；弹窗：${state.blocked}` : '') + '）');
     }
   }
 }

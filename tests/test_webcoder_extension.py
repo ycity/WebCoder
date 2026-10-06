@@ -72,6 +72,23 @@ function answer() {
   turns.lastElementChild.firstChild.textContent = asked;
   input.innerHTML = ''; send.disabled = true; send.hidden = true;
   form.insertAdjacentHTML('beforeend', '<button type="button" data-testid="stop-button" id="stop">Stop</button>');
+  if (asked.includes('outside') && app) {  // a confirmation before any reply turn: in a row of its own, no Stop
+    setTimeout(() => {
+      document.getElementById('stop').remove();
+      turns.insertAdjacentHTML('beforeend', '<li class="toolcall"><div class="card">' +
+        '<img alt="" src="connectors://asdk_app_WebCoder1/logo"><p>WebCoder wants to use write_file</p>' +
+        '<div><button type="button" id="deny">Deny</button><button type="button" id="confirm">Confirm</button></div>' +
+        '</div></li>');
+      document.getElementById('confirm').addEventListener('click', () => {
+        window.confirmed = { outside: true };
+        turns.querySelector('.toolcall').remove();
+        turns.insertAdjacentHTML('beforeend', '<li data-message-role="assistant" data-message-complete>' +
+          '<div data-assistant-markdown><p>Wrote the report.</p></div></li>');
+        send.hidden = false;
+      });
+    }, 150);
+    return;
+  }
   const li = document.createElement('li');
   li.setAttribute('data-message-role', 'assistant');
   li.setAttribute('data-message-streaming', '');
@@ -175,6 +192,32 @@ def test_submit_attaches_the_app_and_approves_the_write(page):
     assert again["ok"] and page.evaluate("window.sent[1]") == {"text": "and the tests", "app": True}
     state, _ = follow(page, "WebCoder")
     assert state["text"].startswith("Reading files")
+
+
+def test_a_confirmation_outside_any_reply_turn_is_found(page):
+    """What stalled a real review: the card came while the page showed no reply turn and no Stop button."""
+    assert call(page, {"cmd": "submit", "prompt": "write it outside", "app": "WebCoder", "newChat": True})["ok"]
+    page.wait_for_selector("#confirm")
+    waiting = call(page, {"cmd": "poll", "app": "WebCoder", "autoApprove": False})
+    assert not waiting["started"] and waiting["pending"]  # the task waits for it rather than giving up
+    assert waiting["approvals"] == [{"tool": "write_file", "text": "Confirm", "decision": "pending"}]
+    assert waiting["buttons"] == ["Deny", "Confirm"]  # named if the task gives up anyway
+    state, approvals = follow(page, "WebCoder")
+    assert approvals == [{"tool": "write_file", "text": "Confirm", "decision": "auto"}]
+    assert page.evaluate("window.confirmed") == {"outside": True} and state["text"] == "Wrote the report."
+
+
+def test_a_card_above_the_last_message_is_left_alone(page):
+    page.evaluate("""() => {
+      document.getElementById('turns').insertAdjacentHTML('beforeend', '<li class="toolcall"><div class="card">' +
+        '<img alt="" src="connectors://asdk_app_WebCoder1/logo"><p>WebCoder wants to use delete_path</p><div>' +
+        '<button type="button">Deny</button><button type="button" id="stale">Confirm</button></div></div></li>');
+      document.getElementById('stale').addEventListener('click', () => { window.stalePressed = true; });
+    }""")
+    assert call(page, {"cmd": "submit", "prompt": "fix the bug", "app": "WebCoder", "newChat": False})["ok"]
+    state, approvals = follow(page, "WebCoder")
+    assert [item["tool"] for item in approvals] == ["edit_file"] and state["text"].endswith("Done.")
+    assert page.evaluate("window.stalePressed") is None  # from before this message: never ours to press
 
 
 def test_without_auto_approval_the_confirmation_waits(page):

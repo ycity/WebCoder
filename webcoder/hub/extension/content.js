@@ -17,8 +17,8 @@
     sendLabel: /^(发送|send)/i,
     stop: ["[data-testid='stop-button']", "button[aria-label*='停止']", "button[aria-label*='Stop' i]"],
     // One element per turn, whatever the page generation: the outermost match is the turn.
-    turn: "li[data-message-role], [data-message-author-role], [data-chatgpt-search-unit-key$=':assistant'], " +
-      "[data-chatgpt-search-unit-key$=':user']",
+    turn: "li[data-message-role], [data-message-author-role], [data-turn='assistant'], [data-turn='user'], " +
+      "[data-chatgpt-search-unit-key$=':assistant'], [data-chatgpt-search-unit-key$=':user']",
     markdown: ["[data-assistant-markdown]", "[data-markdown-text-style='assistant-message']:not([data-markdown-text-tone='tertiary'])",
       '.markdown'],
     streaming: '[data-message-streaming], .result-streaming',
@@ -85,7 +85,7 @@
   function role(el) {
     const key = el.getAttribute('data-chatgpt-search-unit-key') || '';
     return el.getAttribute('data-message-role') || el.getAttribute('data-message-author-role') ||
-      (key.endsWith(':assistant') ? 'assistant' : key.endsWith(':user') ? 'user' : '');
+      el.getAttribute('data-turn') || (key.endsWith(':assistant') ? 'assistant' : key.endsWith(':user') ? 'user' : '');
   }
   function lastUserTurn() {
     const list = turns().filter((el) => role(el) === 'user');
@@ -96,6 +96,17 @@
     let start = -1;
     list.forEach((el, i) => { if (role(el) === 'user') start = i; });
     return list.slice(start + 1).filter((el) => role(el) === 'assistant');
+  }
+  // Buttons in the conversation below the person's last message, wherever the page draws them: a tool's
+  // confirmation can come before (or outside) anything the page marks as a reply turn. Never the composer's.
+  function laterButtons() {
+    const user = lastUserTurn();
+    const thread = document.querySelector('main');
+    if (!user || !thread) return [];
+    const composerForm = form(composer());
+    return Array.from(thread.querySelectorAll('button')).filter((button) => !user.contains(button) &&
+      (user.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+      !(composerForm && composerForm.contains(button)) && visible(button));
   }
   // Rendered text, with code blocks back as fenced Markdown (innerText would give the language label as a line
   // of its own and lose the fences).
@@ -406,8 +417,10 @@
   function confirmCard(button, area) {
     let row = null;
     let card = null;
+    const input = composer();
     for (let el = button.parentElement, depth = 0; el && area.contains(el) && depth < 12; el = el.parentElement, depth++) {
       if (el.matches(SITE.turn) || el.matches(PROSE) || el.querySelector(PROSE)) break;
+      if (el.querySelector(SITE.turn) || (input && el.contains(input))) break;  // past the card: the thread itself
       const others = Array.from(el.querySelectorAll('button')).filter((other) => other !== button && visible(other));
       if (others.some((other) => SITE.confirm.test(buttonLabel(other)))) break;
       if ((el.innerText || '').length > 2000) break;
@@ -474,34 +487,35 @@
       verdicts.set(button, item.decision);
       found.push(item);
     };
-    for (const area of areas) {
-      for (const button of area.querySelectorAll('button')) {
-        const label = buttonLabel(button);
-        if (!visible(button) || button.disabled || !SITE.confirm.test(label)) continue;
-        if (pressed.has(button)) continue;  // ours, approved: its card is on its way out
-        const box = confirmCard(button, area);
-        if (!box) { report(button, { tool: '', text: label, decision: 'ignored' }); continue; }
-        const tool = ((box.innerText || '').match(SITE.tools) || [])[0] || '';
-        if (!isOurs(box, key)) {
-          pending = true;
-          report(button, { tool, text: label, decision: 'foreign', title: cardTitle(box) });
-          continue;
-        }
-        if (!auto) {
-          pending = true;
-          report(button, { tool, text: label, decision: 'pending' });
-          continue;
-        }
-        pressed.add(button);
-        for (const toggle of box.querySelectorAll("input[type='checkbox'], [role='checkbox'], [role='switch']")) {
-          const wrap = toggle.closest('label') || toggle.parentElement || toggle;
-          const words = (wrap.innerText || '') + ' ' + (toggle.getAttribute('aria-label') || '');
-          const on = toggle.checked || toggle.getAttribute('aria-checked') === 'true';
-          if (!on && SITE.remember.test(words)) press(toggle);  // remember the choice for this conversation
-        }
-        press(button);
-        report(button, { tool, text: label, decision: 'auto' });
+    const candidates = new Map();  // button -> the area its card is looked for in
+    for (const area of areas) for (const button of area.querySelectorAll('button')) candidates.set(button, area);
+    for (const button of laterButtons()) if (!candidates.has(button)) candidates.set(button, button.closest('main'));
+    for (const [button, area] of candidates) {
+      const label = buttonLabel(button);
+      if (!visible(button) || button.disabled || !SITE.confirm.test(label)) continue;
+      if (pressed.has(button)) continue;  // ours, approved: its card is on its way out
+      const box = confirmCard(button, area);
+      if (!box) { report(button, { tool: '', text: label, decision: 'ignored' }); continue; }
+      const tool = ((box.innerText || '').match(SITE.tools) || [])[0] || '';
+      if (!isOurs(box, key)) {
+        pending = true;
+        report(button, { tool, text: label, decision: 'foreign', title: cardTitle(box) });
+        continue;
       }
+      if (!auto) {
+        pending = true;
+        report(button, { tool, text: label, decision: 'pending' });
+        continue;
+      }
+      pressed.add(button);
+      for (const toggle of box.querySelectorAll("input[type='checkbox'], [role='checkbox'], [role='switch']")) {
+        const wrap = toggle.closest('label') || toggle.parentElement || toggle;
+        const words = (wrap.innerText || '') + ' ' + (toggle.getAttribute('aria-label') || '');
+        const on = toggle.checked || toggle.getAttribute('aria-checked') === 'true';
+        if (!on && SITE.remember.test(words)) press(toggle);  // remember the choice for this conversation
+      }
+      press(button);
+      report(button, { tool, text: label, decision: 'auto' });
     }
     return { found, pending };
   }
@@ -525,6 +539,8 @@
       pending: approval.pending,
       blocked: blockingDialog(),
       loggedOut,
+      // What the page offers below the person's message, named when a task gives up waiting on it.
+      buttons: [...new Set(laterButtons().map(buttonLabel).filter(Boolean))].slice(0, 12),
     };
   }
 

@@ -20,6 +20,7 @@ const [, , file, scenario] = process.argv;
 const fast = (ms) => Math.max(1, Math.floor(ms / 100));
 const never = () => new Promise(() => {});
 const asleep = new Set();
+const quiet = new Set();  // tabs whose page shows no reply: only the buttons of a card the poll cannot place
 const tabs = new Map();
 const calls = [];
 let nextTab = 100;
@@ -38,6 +39,10 @@ const chrome = {
     sendMessage: (id, message) => {
       calls.push(['message', id, message.cmd]);
       if (asleep.has(id)) return never();
+      if (quiet.has(id) && message.cmd === 'poll') {
+        return Promise.resolve({ ok: true, url: 'https://chatgpt.com/c/x', text: '', started: false, generating: false,
+          complete: false, approvals: [], pending: false, blocked: null, buttons: ['允许', '拒绝'] });
+      }
       return Promise.resolve(message.cmd === 'draft' ? { ok: true, draft: false } : { ok: true });
     },
     update: async (id, props) => {
@@ -62,8 +67,11 @@ const chrome = {
   windows: { create: async () => ({ tabs: [] }) },
 };
 class FakeSocket { static OPEN = 1; constructor() { this.readyState = 0; } send() {} close() {} }
+const realNow = Date.now;
+const t0 = realNow();
+class FastDate extends Date { static now() { return t0 + (realNow() - t0) * 100; } }  // the clock runs with the timers
 const context = vm.createContext({
-  chrome, console, URL, WebSocket: FakeSocket, navigator: { userAgent: 'Edg/150 Windows' },
+  chrome, console, URL, WebSocket: FakeSocket, navigator: { userAgent: 'Edg/150 Windows' }, Date: FastDate,
   crypto: { randomUUID: () => 'id' },
   setTimeout: (fn, ms) => setTimeout(fn, fast(ms)), clearTimeout, setInterval: () => 0,
 });
@@ -90,6 +98,11 @@ const run = (code) => vm.runInContext(code, context);
     tabs.set(11, { id: 11, url: 'https://chatgpt.com/', status: 'complete', discarded: false });
     asleep.add(11);
     result = await run('ensureContent(11).then(() => "ok", (e) => e.code)');
+  } else if (scenario === 'no-reply') {
+    tabs.set(12, { id: 12, url: 'https://chatgpt.com/c/x', status: 'complete', discarded: false });
+    quiet.add(12);
+    result = await run("follow({ id: 'j', app: 'WebCoder', timeout: 3600 }, { cancelled: false }, 12, () => {})" +
+      ".then(() => 'done', (e) => e.code + ': ' + e.message)");
   }
   console.log(JSON.stringify({ result, calls, ms: Date.now() - started }));
   process.exit(0);
@@ -135,3 +148,10 @@ def test_injecting_into_a_sleeping_tab_ends_in_an_error_not_a_hang(tmp_path):
     outcome = run_scenario(tmp_path, "content-asleep")
     assert not outcome.get("hung"), outcome["calls"]
     assert outcome["result"] == "NO_CONTENT_SCRIPT"
+
+
+def test_giving_up_on_a_silent_page_names_what_it_shows(tmp_path):
+    outcome = run_scenario(tmp_path, "no-reply")
+    assert not outcome.get("hung"), outcome["calls"][-3:]
+    assert outcome["result"].startswith("NO_REPLY: ChatGPT 三分钟内没有开始回复")
+    assert "页面上有按钮：允许、拒绝" in outcome["result"]
