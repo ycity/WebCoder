@@ -33,6 +33,6 @@ def test_official_sdk_client(hub, start_agent, tmp_path, mode):
         return tools, listed, read
 
     tools, listed, read = asyncio.run(_session(hub.url + "/mcp", token, mode, work))
-    assert len(tools.tools) == 35
+    assert len(tools.tools) == 36
     assert "app [read-write]" in listed.content[0].text
     assert "hello from the device" in read.content[0].text and not read.is_error

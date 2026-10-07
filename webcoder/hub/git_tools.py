@@ -1,9 +1,9 @@
-"""MCP tools for git in a project: the agent on the project's computer runs one fixed git command for each
-(webcoder/agent/gitops.py says what git may and may not do there).
+"""MCP tools for git in a project: the agent on the project's computer runs git for each (webcoder/agent/gitops.py
+says how): git_run any git command as given, the others one fixed, confined command each.
 
 Reading (status, diff, log, show, blame, branches) needs the read permission; anything that changes the
-repository, the working tree or a remote needs write, on a read-write project. The project folder must be
-the top of its repository.
+repository, the working tree or a remote needs write, on a read-write project. Apart from git_run and git_init,
+the project folder must be the top of its repository.
 """
 from __future__ import annotations
 
@@ -154,5 +154,20 @@ _GIT_LIST = [
          "Create a git repository in the project folder.",
          "write", _object({"project": PROJECT, "initial_branch": BRANCH}, ("project",)), CHANGE,
          _runner("git.init", write=True)),
+    Tool("git_run", "Run git",
+         "Run any git command in the project folder with any arguments (a list, no shell), as the owner would at "
+         "their computer: hooks, settings, credentials and every option work as usual; it never prompts. Use it "
+         "for anything the other git_* tools do not cover or refuse (submodules, worktrees, bisect, config, "
+         "remotes, commits with hooks ...). stdin feeds the command, e.g. args [\"apply\", \"-\"] with a patch.",
+         "write", _object({"project": PROJECT,
+                           "args": {"type": "array", "items": {"type": "string", "maxLength": 30000}, "minItems": 1,
+                                    "maxItems": 500,
+                                    "description": "git's arguments without git itself, e.g. [\"submodule\", "
+                                                   "\"update\", \"--init\"]"},
+                           "stdin": {"type": "string", "maxLength": 1000000,
+                                     "description": "Text for the command's standard input"},
+                           "timeout": {"type": "integer", "minimum": 1, "maximum": 600, "default": 120}},
+                          ("project", "args")),
+         REMOTE, _runner("git.run", write=True, timeout=630.0)),
 ]
 GIT_TOOLS: dict[str, Tool] = {tool.name: tool for tool in _GIT_LIST}

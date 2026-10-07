@@ -1,14 +1,13 @@
 """Git in project folders, for the hub's git_* tools.
 
-Every operation is a fixed git command built here from checked arguments, never a free-form command line:
-git's options include several ways to run any program (-c alias.x=!cmd, --upload-pack, ext:: remotes,
-rebase --exec, submodule foreach ...), which would turn this into a shell on the owner's computer.
+git.run runs any git command as given, the way the owner would at this computer: hooks, settings and every
+option work as usual (git's options can run any program: -c alias.x=!cmd, rebase --exec ...).
 
-Git runs with hooks, fsmonitor, external diff / textconv, pagers and editors off (hooks and pre-commit /
-husky setups live in files the AI can edit, so running them would run its code), never prompts for
-passwords, only talks to remotes already configured in the repository, and is stopped with the agent's
-other tools when the hub revokes the device. Files on the deny list stay out of diffs and are never
-staged. Commands that throw away uncommitted work first save it under refs/webcoder/snapshots/.
+Every other operation is a fixed git command built here from checked arguments, confined: hooks, fsmonitor,
+external diff / textconv, pagers and editors are off, it only talks to remotes already configured in the
+repository, files on the deny list stay out of diffs and are never staged, and commands that throw away
+uncommitted work first save it under refs/webcoder/snapshots/. No git command prompts for passwords, and all
+are stopped with the agent's other tools when the hub revokes the device.
 """
 from __future__ import annotations
 
@@ -31,6 +30,7 @@ MAX_LISTING = 128 * 1024 * 1024  # file lists the safety checks read whole (a bi
 MAX_SETTINGS = 16 * 1024 * 1024  # all of git's settings, read whole before anything runs
 LOCAL_TIMEOUT = 120
 NETWORK_TIMEOUT = 300
+MAX_STDIN = 1024 * 1024
 REF_RE = re.compile(r"^(?![-.])(?!.*\.\.)[A-Za-z0-9._/~^@{}+\-]{1,200}$")  # a1b2c3d, main, v1.2, HEAD~2, stash@{1}
 BRANCH_RE = re.compile(r"^(?![-./])(?!.*\.\.)(?!.*//)(?!.*@\{)(?!.*\.lock(?:/|$))(?!.*[./]$)[A-Za-z0-9._/\-]{1,200}$")
 REMOTE_RE = re.compile(r"^(?![-.])[A-Za-z0-9._\-]{1,100}$")
@@ -139,7 +139,7 @@ class GitOps:
                   "git.blame": "blame", "git.branches": "branches", "git.add": "add", "git.commit": "commit",
                   "git.restore": "restore", "git.reset": "reset", "git.branch": "branch", "git.stash": "stash",
                   "git.sync": "sync", "git.integrate": "integrate", "git.tag": "tag", "git.clean": "clean",
-                  "git.init": "init"}
+                  "git.init": "init", "git.run": "run"}
     READS = {"git.status", "git.diff", "git.log", "git.show", "git.blame", "git.branches"}
 
     def __init__(self, files, *, command=None, hooks_dir=None):
@@ -158,7 +158,7 @@ class GitOps:
             raise WebCoderError("INVALID_ARGUMENT", f"Invalid arguments for {op}: {exc}") from None
         if op not in self.READS and self.files.sb.read_only:
             raise WebCoderError("AGENT_READ_ONLY", "The agent on this device is configured read-only")
-        if op not in self.READS and op != "git.init":
+        if op not in self.READS and op not in ("git.init", "git.run"):
             self._refuse_tracked_agent_files(args.get("root"))
         return method(**args)
 
@@ -186,11 +186,7 @@ class GitOps:
             env.pop(name, None)  # the repository is the project folder, and pathspec magic is ours
         return env
 
-    def _git(self, cwd: str, args: list[str], timeout: float = LOCAL_TIMEOUT, limit: int = MAX_OUTPUT,
-             extra_env: dict | None = None, stdin: bytes | None = None) -> subprocess.CompletedProcess:
-        git = locate_git(self.command)
-        if git is None:
-            raise WebCoderError("GIT_MISSING", "git was not found on this computer (install Git and restart the agent)")
+    def _confinement(self) -> list[str]:
         hooks = os.devnull  # a hooks folder with nothing in it: no hook ever runs
         if self.hooks_dir:
             try:
@@ -198,9 +194,17 @@ class GitOps:
                 hooks = self.hooks_dir
             except OSError:
                 pass
-        argv = [*git, "-c", f"core.hooksPath={hooks}", "-c", "core.fsmonitor=false", "-c", "core.pager=cat",
+        return ["-c", f"core.hooksPath={hooks}", "-c", "core.fsmonitor=false", "-c", "core.pager=cat",
                 "-c", "core.editor=:", "-c", "core.askPass=", "-c", "color.ui=false", "-c", "core.quotePath=false",
-                "-c", "diff.external=", "-c", "protocol.ext.allow=never", "-c", "submodule.recurse=false", *args]
+                "-c", "diff.external=", "-c", "protocol.ext.allow=never", "-c", "submodule.recurse=false"]
+
+    def _git(self, cwd: str, args: list[str], timeout: float = LOCAL_TIMEOUT, limit: int = MAX_OUTPUT,
+             extra_env: dict | None = None, stdin: bytes | None = None,
+             confined: bool = True) -> subprocess.CompletedProcess:
+        git = locate_git(self.command)
+        if git is None:
+            raise WebCoderError("GIT_MISSING", "git was not found on this computer (install Git and restart the agent)")
+        argv = [*git, *(self._confinement() if confined else ()), *args]
         try:
             if stdin is None:
                 return run_capped(argv, timeout, limit, cwd=cwd, env={**self._env(), **(extra_env or {})})
@@ -968,3 +972,19 @@ class GitOps:
         return {"command": "git " + " ".join(args), "exit_code": done.returncode,
                 "stdout": done.stdout.decode("utf-8", "replace"), "stderr": done.stderr.decode("utf-8", "replace"),
                 "truncated": False, "snapshot": None}
+
+    def run(self, root, args, stdin=None, timeout=LOCAL_TIMEOUT) -> dict:
+        """Any git command in the project folder, unconfined; only prompts are off (nobody is here to answer)."""
+        if (not isinstance(args, list) or not 1 <= len(args) <= 500
+                or any(not isinstance(a, str) or "\x00" in a for a in args) or sum(len(a) + 3 for a in args) > 30_000):
+            raise WebCoderError("INVALID_ARGUMENT", "args must be a list of 1-500 strings (at most 30,000 characters "
+                                "in all), without git itself")
+        if stdin is not None and (not isinstance(stdin, str) or len(stdin) > MAX_STDIN):
+            raise WebCoderError("INVALID_ARGUMENT", f"stdin must be text of at most {MAX_STDIN:,} characters")
+        timeout = _count(timeout, "timeout", 1, 600)
+        real = self.files.sb.root(root)
+        done = self._git(real, args, timeout, stdin=None if stdin is None else stdin.encode("utf-8"), confined=False)
+        return {"command": shlex.join(["git", *args]), "exit_code": done.returncode,
+                "stdout": _mask(done.stdout.decode("utf-8", "replace")),
+                "stderr": _mask(done.stderr.decode("utf-8", "replace")),
+                "truncated": done.stdout_cut or done.stderr_cut, "snapshot": None}

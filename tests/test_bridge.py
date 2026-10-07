@@ -59,7 +59,7 @@ def test_bridge_reads_token_file_as_the_tunnel_does(hub, tmp_path):
     replies = run_bridge(hub.url + "/mcp", [INITIALIZE, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}],
                          extra_args=["--token-file", token_file.as_posix()])
     tools = next(reply for reply in replies if reply["id"] == 2)["result"]["tools"]
-    assert len(tools) == 35 and tools[0]["securitySchemes"] == [{"type": "noauth"}]
+    assert len(tools) == 36 and tools[0]["securitySchemes"] == [{"type": "noauth"}]
 
 
 def test_bridge_reports_bad_token_on_the_request_id(hub):
@@ -135,7 +135,7 @@ def test_bridge_finds_the_token_under_a_home_folder_with_a_space(hub, tmp_path):
     (home / ".webcoder" / "token.txt").write_text(hub.create_token() + "\n", encoding="utf-8")
     replies = run_bridge(hub.url + "/mcp", [INITIALIZE, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}],
                          env_extra=home_env(home))
-    assert len(next(reply for reply in replies if reply["id"] == 2)["result"]["tools"]) == 35
+    assert len(next(reply for reply in replies if reply["id"] == 2)["result"]["tools"]) == 36
     # --token-file accepts ~ too (tunnel-client starts the command without a shell to expand it), and a named file
     # wins over a WEBCODER_TOKEN set for Codex, which tunnel-client would pass on
     replies = run_bridge(hub.url + "/mcp", [INITIALIZE], token="wc_pat_set_for_codex", env_extra=home_env(home),

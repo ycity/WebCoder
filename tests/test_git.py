@@ -189,6 +189,35 @@ def test_hooks_never_run(ops, repo, tmp_path):
     assert not marker.exists()
 
 
+def test_git_run_runs_any_git_command_as_the_owner_would(ops, repo, tmp_path):
+    marker = tmp_path / "hook-ran"
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text(f"#!/bin/sh\necho ran > '{marker.as_posix()}'\n", encoding="utf-8", newline="\n")
+    hook.chmod(0o755)
+    (repo / "app.py").write_bytes(b"print('v2')\n")
+    done = run(ops, "git.run", root=root(repo), args=["commit", "-am", "with hooks"])
+    assert done["exit_code"] == 0 and done["command"] == "git commit -am 'with hooks'" and marker.exists()
+    patch = ("diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n"
+             "@@ -0,0 +1 @@\n+hello\n")
+    assert run(ops, "git.run", root=root(repo), args=["apply", "-"], stdin=patch)["exit_code"] == 0
+    assert (repo / "new.txt").read_text(encoding="utf-8").strip() == "hello"
+    assert run(ops, "git.run", root=root(repo), args=["show", "HEAD:.env"])["stdout"] == "TOKEN=secret-v1\n"
+    run(ops, "git.run", root=root(repo), args=["remote", "add", "origin", "https://me:tok@example.com/x.git"])
+    assert "https://***@example.com/x.git" in run(ops, "git.run", root=root(repo), args=["remote", "-v"])["stdout"]
+    failed = run(ops, "git.run", root=root(repo), args=["rev-parse", "--verify", "nope"])
+    assert failed["exit_code"] != 0 and failed["stderr"]
+    (repo / "sub").mkdir()  # unlike the confined tools: a folder inside a larger repository is fine
+    assert run(ops, "git.run", root=str(repo / "sub"), args=["rev-parse", "--show-toplevel"])["exit_code"] == 0
+    readonly = FileOps(Sandbox([repo], read_only=True), BackupStore(tmp_path / "b-ro"))
+    readonly.git = GitOps(readonly)
+    for target, args, expected in ((readonly, {"args": ["status"]}, "AGENT_READ_ONLY"),
+                                   (ops, {"args": []}, "INVALID_ARGUMENT"),
+                                   (ops, {"args": "status"}, "INVALID_ARGUMENT"),
+                                   (ops, {"args": ["status"], "timeout": 0}, "INVALID_ARGUMENT")):
+        with pytest.raises(WebCoderError) as err:
+            run(target, "git.run", root=root(repo), **args)
+        assert code(err) == expected, args
+
 def test_clean_never_takes_a_folder_as_a_whole_unless_asked(ops, repo):
     """With a pathspec, git clean deletes untracked folders even without -d, and does not look inside them."""
     (repo / "junk").mkdir()
@@ -736,7 +765,15 @@ def test_git_tools_through_the_hub(hub, start_agent, tmp_path):
     assert "exit code 0" in done and "from chatgpt" in git(work, "log", "-1", "--format=%s")
     text, is_error = hub.call(writer, "git_integrate", project="app", operation="merge", ref="nope")
     assert is_error and "GIT_FAILED" in text
+    assert "git_run" in names
+    text, is_error = hub.call(reader, "git_run", project="app", args=["status"])
+    assert is_error and "INSUFFICIENT_SCOPE" in text
+    text, is_error = hub.call(writer, "git_run", project="frozen", args=["status"])
+    assert is_error and "PROJECT_READ_ONLY" in text
+    assert "main" in hub.ok(writer, "git_run", project="app", args=["rev-parse", "--abbrev-ref", "HEAD"])
     audit = hub.runtime.store.all("SELECT action, target, status FROM audit WHERE action LIKE 'git_%'")
+    assert any(row["action"] == "git_run" and row["target"] == "app: git rev-parse --abbrev-ref HEAD"
+               and row["status"] == "ok" for row in audit)
     committed = [row["target"] for row in audit if row["action"] == "git_commit" and row["status"] == "ok"]
     assert len(committed) == 1 and committed[0].startswith("app: git add --update -- . :(exclude,glob,icase)**/")
     assert committed[0].endswith(" && git commit --no-verify -m from chatgpt")  # both steps, in full
