@@ -72,6 +72,26 @@ function answer() {
   turns.lastElementChild.firstChild.textContent = asked;
   input.innerHTML = ''; send.disabled = true; send.hidden = true;
   form.insertAdjacentHTML('beforeend', '<button type="button" data-testid="stop-button" id="stop">Stop</button>');
+  if (asked.includes('abovecomposer') && app) {  // as on chatgpt.com 2026-10: 「正在思考」, then the card just above
+    setTimeout(() => {                            // the composer, outside the thread, buttons with keyboard hints
+      document.getElementById('stop').remove();
+      form.insertAdjacentHTML('beforebegin', '<div id="pending-tool"><div>正在思考</div><div class="card">' +
+        '<div><img alt="" src="connectors://asdk_app_WebCoder1/logo"><span>WebCoder</span></div>' +
+        '<div>允许 ChatGPT 使用 WebCoder?</div>' +
+        '<div>在项目 dolrev-1 中创建或覆盖私有审查报告文件。<a href="#">查看详情</a></div>' +
+        '<div><button type="button" id="deny">拒绝<kbd>Esc</kbd></button>' +
+        '<button type="button" id="confirm">允许一次<kbd>⏎</kbd></button>' +
+        '<button type="button" aria-haspopup="menu" aria-label="更多选项"><svg></svg></button></div></div></div>');
+      document.getElementById('confirm').addEventListener('click', () => {
+        window.confirmed = { above: true };
+        document.getElementById('pending-tool').remove();
+        turns.insertAdjacentHTML('beforeend', '<li data-message-role="assistant" data-message-complete>' +
+          '<div data-assistant-markdown><p>Wrote the report.</p></div></li>');
+        send.hidden = false;
+      });
+    }, 150);
+    return;
+  }
   if (asked.includes('outside') && app) {  // a confirmation before any reply turn: in a row of its own, no Stop
     setTimeout(() => {
       document.getElementById('stop').remove();
@@ -205,6 +225,17 @@ def test_a_confirmation_outside_any_reply_turn_is_found(page):
     state, approvals = follow(page, "WebCoder")
     assert approvals == [{"tool": "write_file", "text": "Confirm", "decision": "auto"}]
     assert page.evaluate("window.confirmed") == {"outside": True} and state["text"] == "Wrote the report."
+
+
+def test_the_card_above_the_composer_is_approved_once(page):
+    """chatgpt.com 2026-10: the card waits above the composer, its buttons read 「拒绝 Esc」「允许一次 ⏎」."""
+    assert call(page, {"cmd": "submit", "prompt": "review abovecomposer", "app": "WebCoder", "newChat": True})["ok"]
+    page.wait_for_selector("#confirm")
+    waiting = call(page, {"cmd": "poll", "app": "WebCoder", "autoApprove": False})
+    assert waiting["pending"] and waiting["approvals"] == [{"tool": "", "text": "允许一次", "decision": "pending"}]
+    state, approvals = follow(page, "WebCoder")
+    assert approvals == [{"tool": "", "text": "允许一次", "decision": "auto"}]
+    assert page.evaluate("window.confirmed") == {"above": True} and state["text"] == "Wrote the report."
 
 
 def test_a_card_above_the_last_message_is_left_alone(page):

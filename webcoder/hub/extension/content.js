@@ -32,8 +32,9 @@
     chip: "[app-mention-name], [app-mention-display-name], [contenteditable='false'], [data-mention], .mention, " +
       "[data-testid*='pill' i]",
     loggedOut: 'form[data-logged-out], [data-testid="login-button"]',
-    // Tool-call confirmations (write tools need one unless remembered for the conversation).
-    confirm: /^(confirm|allow|approve|accept|run|continue|确认|允许|批准|同意|运行|继续)$/i,
+    // Tool-call confirmations (write tools need one unless remembered for the conversation). Labels are read
+    // without the keyboard hint beside them (「允许一次 ⏎」「拒绝 Esc」, 2026-10).
+    confirm: /^(confirm|allow|allow once|approve|accept|run|continue|确认|允许|允许一次|批准|同意|运行|继续)$/i,
     deny: /^(deny|decline|reject|cancel|don.t allow|拒绝|取消|不允许)$/i,  // its counterpart on a confirmation card
     remember: /(remember|always|don.t ask|for this (chat|conversation)|记住|始终|总是|不再询问|本次对话|此对话)/i,
     // WebCoder's tool names, to say which one a confirmation is for (shown only; never what makes a card ours).
@@ -97,16 +98,16 @@
     list.forEach((el, i) => { if (role(el) === 'user') start = i; });
     return list.slice(start + 1).filter((el) => role(el) === 'assistant');
   }
-  // Buttons in the conversation below the person's last message, wherever the page draws them: a tool's
-  // confirmation can come before (or outside) anything the page marks as a reply turn. Never the composer's.
+  // Buttons on the page below the person's last message, wherever it draws them: a tool's confirmation can come
+  // before (or outside) anything the page marks as a reply turn, e.g. just above the composer (2026-10). Never
+  // inside the editor or the "@" menu; whether a button is a confirmation, and ours, is decided per card.
   function laterButtons() {
     const user = lastUserTurn();
-    const thread = document.querySelector('main');
-    if (!user || !thread) return [];
-    const composerForm = form(composer());
-    return Array.from(thread.querySelectorAll('button')).filter((button) => !user.contains(button) &&
+    if (!user) return [];
+    const input = composer();
+    return Array.from(document.querySelectorAll('button')).filter((button) => !user.contains(button) &&
       (user.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING) &&
-      !(composerForm && composerForm.contains(button)) && visible(button));
+      !(input && input.contains(button)) && !button.closest('[data-composer-overlay-floating-ui]') && visible(button));
   }
   // Rendered text, with code blocks back as fenced Markdown (innerText would give the language label as a line
   // of its own and lose the fences).
@@ -407,7 +408,15 @@
 
   const verdicts = new WeakMap();  // confirm button -> the verdict last reported on it
   const pressed = new WeakSet();   // confirm buttons approved (pressed once, never again)
-  const buttonLabel = (button) => ((button.innerText || '').trim() || button.getAttribute('aria-label') || '').trim();
+  // A button's words, without a keyboard hint shown in it (<kbd>Esc</kbd>, ⏎).
+  const SHORTCUT = /\s*(esc|enter|return|⏎|↵)$/i;
+  const buttonLabel = (button) => {
+    let text = button.innerText || '';
+    for (const hint of button.querySelectorAll('kbd')) text = text.replace(hint.innerText || '\u0000', '');
+    text = text.replace(/\s+/g, ' ').trim();
+    while (SHORTCUT.test(text) && text.replace(SHORTCUT, '').trim()) text = text.replace(SHORTCUT, '').trim();
+    return text || (button.getAttribute('aria-label') || '').trim();
+  };
   const PROSE = SITE.markdown.join(', ');
   // The confirmation card a confirm button belongs to: from the nearest element around it that holds a deny /
   // cancel button (the row of buttons) outwards, as long as nothing else comes in: no other confirm button (a
@@ -489,7 +498,7 @@
     };
     const candidates = new Map();  // button -> the area its card is looked for in
     for (const area of areas) for (const button of area.querySelectorAll('button')) candidates.set(button, area);
-    for (const button of laterButtons()) if (!candidates.has(button)) candidates.set(button, button.closest('main'));
+    for (const button of laterButtons()) if (!candidates.has(button)) candidates.set(button, document.body);
     for (const [button, area] of candidates) {
       const label = buttonLabel(button);
       if (!visible(button) || button.disabled || !SITE.confirm.test(label)) continue;
@@ -526,6 +535,7 @@
     const approval = approvals(msg.app, msg.autoApprove !== false && !aborted);  // a cancelled task approves nothing
     const busy = generating();
     const loggedOut = !!document.querySelector(SITE.loggedOut);
+    const composerForm = form(composer());
     return {
       ok: true,
       url: location.href,
@@ -539,8 +549,10 @@
       pending: approval.pending,
       blocked: blockingDialog(),
       loggedOut,
-      // What the page offers below the person's message, named when a task gives up waiting on it.
-      buttons: [...new Set(laterButtons().map(buttonLabel).filter(Boolean))].slice(0, 12),
+      // What the page offers below the person's message (besides the composer's own controls), named when a task
+      // gives up waiting on it.
+      buttons: [...new Set(laterButtons().filter((button) => !(composerForm && composerForm.contains(button)))
+        .map(buttonLabel).filter(Boolean))].slice(0, 12),
     };
   }
 
