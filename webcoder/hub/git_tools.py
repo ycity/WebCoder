@@ -7,6 +7,9 @@ the project folder must be the top of its repository.
 """
 from __future__ import annotations
 
+import shlex
+
+from webcoder.agent.gitops import mask_remotes
 from webcoder.common.errors import WebCoderError
 from webcoder.hub.tools import PATH, PROJECT, Tool, ToolContext, _object
 
@@ -22,6 +25,7 @@ PATHS = {"type": "array", "items": PATH, "minItems": 1, "maxItems": 200,
          "description": "Paths in the project (leave it out rather than empty)"}
 FLAG = {"type": "boolean", "default": False}
 MESSAGE = {"type": "string", "minLength": 1, "maxLength": 20000}
+MAX_COMMAND = 19_000  # characters of a git_run command written out: the audit log keeps it (with the project) whole
 _RENAMED = {"all": "every"}  # schema name -> agent parameter
 
 
@@ -49,6 +53,22 @@ def _runner(op: str, *, write: bool, timeout: float = 150.0):
             raise WebCoderError("GIT_FAILED", text)
         return text
     return run
+
+
+async def _run_any(ctx: ToolContext, a: dict) -> str:
+    command = mask_remotes(shlex.join(["git", *a["args"]]))
+    if len(command) > MAX_COMMAND:
+        ctx.audit_target = command[:MAX_COMMAND] + " …"
+        raise WebCoderError("INVALID_ARGUMENT", f"The command is {len(command):,} characters written out; at most "
+                            f"{MAX_COMMAND:,} can run, so that the audit log keeps it whole. Pass long text on stdin")
+    project = ctx.project(a["project"], write=True)
+    ctx.audit_target = f"{project['alias']}: {command}"  # logged even if it fails or times out
+    args = {key: value for key, value in a.items() if key != "project" and value is not None}
+    r = await ctx.agent(project, "git.run", args, a["timeout"] + 30.0)
+    text = _format(project, r)
+    if r["exit_code"] != 0:
+        raise WebCoderError("GIT_FAILED", text)
+    return text
 
 
 _GIT_LIST = [
@@ -158,7 +178,8 @@ _GIT_LIST = [
          "Run any git command in the project folder with any arguments (a list, no shell), as the owner would at "
          "their computer: hooks, settings, credentials and every option work as usual; it never prompts. Use it "
          "for anything the other git_* tools do not cover or refuse (submodules, worktrees, bisect, config, "
-         "remotes, commits with hooks ...). stdin feeds the command, e.g. args [\"apply\", \"-\"] with a patch.",
+         "remotes, commits with hooks ...). stdin feeds the command, e.g. args [\"apply\", \"-\"] with a patch; "
+         "long text goes there too (a command runs only up to 19,000 characters written out).",
          "write", _object({"project": PROJECT,
                            "args": {"type": "array", "items": {"type": "string", "maxLength": 30000}, "minItems": 1,
                                     "maxItems": 500,
@@ -168,6 +189,6 @@ _GIT_LIST = [
                                      "description": "Text for the command's standard input"},
                            "timeout": {"type": "integer", "minimum": 1, "maximum": 600, "default": 120}},
                           ("project", "args")),
-         REMOTE, _runner("git.run", write=True, timeout=630.0)),
+         REMOTE, _run_any),
 ]
 GIT_TOOLS: dict[str, Tool] = {tool.name: tool for tool in _GIT_LIST}

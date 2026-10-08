@@ -202,7 +202,10 @@ def test_git_run_runs_any_git_command_as_the_owner_would(ops, repo, tmp_path):
     assert run(ops, "git.run", root=root(repo), args=["apply", "-"], stdin=patch)["exit_code"] == 0
     assert (repo / "new.txt").read_text(encoding="utf-8").strip() == "hello"
     assert run(ops, "git.run", root=root(repo), args=["show", "HEAD:.env"])["stdout"] == "TOKEN=secret-v1\n"
-    run(ops, "git.run", root=root(repo), args=["remote", "add", "origin", "https://me:tok@example.com/x.git"])
+    added = run(ops, "git.run", root=root(repo), args=["remote", "add", "origin", "https://me:tok@example.com/x.git"])
+    assert added["command"] == "git remote add origin https://***@example.com/x.git"
+    signed = run(ops, "git.run", root=root(repo), args=["remote", "add", "signed", "https://example.com/y.git?token=t"])
+    assert signed["command"] == "git remote add signed 'https://example.com/y.git?***'"
     assert "https://***@example.com/x.git" in run(ops, "git.run", root=root(repo), args=["remote", "-v"])["stdout"]
     failed = run(ops, "git.run", root=root(repo), args=["rev-parse", "--verify", "nope"])
     assert failed["exit_code"] != 0 and failed["stderr"]
@@ -771,9 +774,16 @@ def test_git_tools_through_the_hub(hub, start_agent, tmp_path):
     text, is_error = hub.call(writer, "git_run", project="frozen", args=["status"])
     assert is_error and "PROJECT_READ_ONLY" in text
     assert "main" in hub.ok(writer, "git_run", project="app", args=["rev-parse", "--abbrev-ref", "HEAD"])
+    text, is_error = hub.call(writer, "git_run", project="app", args=["commit", "-m", "x" * 19_000])
+    assert is_error and "INVALID_ARGUMENT" in text and "stdin" in text  # the audit log could not keep it whole
+    text, is_error = hub.call(writer, "git_run", project="app", args=["ls-remote", "https://me:tok@127.0.0.1:9/x.git"],
+                              timeout=20)
+    assert is_error and "tok" not in text
     audit = hub.runtime.store.all("SELECT action, target, status FROM audit WHERE action LIKE 'git_%'")
     assert any(row["action"] == "git_run" and row["target"] == "app: git rev-parse --abbrev-ref HEAD"
                and row["status"] == "ok" for row in audit)
+    assert not any("tok@" in row["target"] for row in audit)
+    assert any(row["target"] == "app: git ls-remote https://***@127.0.0.1:9/x.git" for row in audit)
     committed = [row["target"] for row in audit if row["action"] == "git_commit" and row["status"] == "ok"]
     assert len(committed) == 1 and committed[0].startswith("app: git add --update -- . :(exclude,glob,icase)**/")
     assert committed[0].endswith(" && git commit --no-verify -m from chatgpt")  # both steps, in full

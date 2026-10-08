@@ -83,7 +83,7 @@ def _mask(text: str) -> str:
     return _CREDENTIALS.sub(r"\1***@", text)
 
 
-def _mask_remotes(text: str) -> str:
+def mask_remotes(text: str) -> str:
     """Where remote URLs are printed: a token can also sit in a URL's query (signed URLs of remote helpers).
     Not for diffs, whose URLs are the project's own content."""
     return _URL_QUERY.sub(r"\1***", _mask(text))
@@ -610,7 +610,7 @@ class GitOps:
                             ("tags (newest first)", ["tag", "--list", "--sort=-creatordate"]),
                             ("stashes", ["stash", "list"])):
             done = self._run(root, args)
-            lines = _mask_remotes(done["stdout"]).splitlines()
+            lines = mask_remotes(done["stdout"]).splitlines()
             cut = cut or done["truncated"] or len(lines) > 300
             if done["exit_code"] != 0:  # never an empty list for one that could not be read
                 failed = failed or done
@@ -618,7 +618,7 @@ class GitOps:
             parts.append(f"== {title}\n" + ("\n".join(lines[:300]) or "(none)"))
         return {"command": "git branch -avv; git remote -v; git tag; git stash list",
                 "exit_code": failed["exit_code"] if failed else 0, "stdout": "\n\n".join(parts),
-                "stderr": _mask_remotes(failed["stderr"]) if failed else "", "truncated": cut, "snapshot": None}
+                "stderr": mask_remotes(failed["stderr"]) if failed else "", "truncated": cut, "snapshot": None}
 
     # ------------------------------------------------------------------ changing the repository
     def add(self, root, paths=None, every=False) -> dict:
@@ -743,7 +743,7 @@ class GitOps:
             if branch is not None and named is None:
                 raise WebCoderError("INVALID_ARGUMENT", "branch needs remote")
             result = self._pull(root, real, named, branch, rebase is True, ff_only is True)
-            return {**result, "stdout": _mask_remotes(result["stdout"]), "stderr": _mask_remotes(result["stderr"])}
+            return {**result, "stdout": mask_remotes(result["stdout"]), "stderr": mask_remotes(result["stderr"])}
         elif action == "push":
             args = ["push", "--no-verify", *_flags(("--set-upstream", set_upstream), ("--tags", tags),
                                                    ("--force-with-lease", force_with_lease), ("--delete", delete))]
@@ -763,7 +763,7 @@ class GitOps:
         else:
             raise WebCoderError("INVALID_ARGUMENT", "action must be fetch, pull or push")
         result = self._run(root, args, timeout=NETWORK_TIMEOUT)
-        return {**result, "stdout": _mask_remotes(result["stdout"]), "stderr": _mask_remotes(result["stderr"])}
+        return {**result, "stdout": mask_remotes(result["stdout"]), "stderr": mask_remotes(result["stderr"])}
 
     def _push_target(self, real: str, remote: str | None, branch: str | None, to: str | None) -> tuple[str, str, str]:
         """(remote, local branch, remote branch) a push goes to: as given, else the current branch to where git
@@ -817,7 +817,7 @@ class GitOps:
         listed = self._git(real, ["ls-remote", "--", remote], timeout=NETWORK_TIMEOUT, limit=MAX_LISTING)
         if listed.returncode != 0 or listed.stdout_cut:
             raise WebCoderError("GIT_FAILED", f"Could not ask {remote} which commits it has, so nothing was pushed: "
-                                + _mask_remotes(listed.stderr.decode("utf-8", "replace").strip()[-300:]))
+                                + mask_remotes(listed.stderr.decode("utf-8", "replace").strip()[-300:]))
         names = sorted({line.split("\t", 1)[0] for line in listed.stdout.decode("ascii", "replace").splitlines()
                         if re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", line.split("\t", 1)[0])})
         if not names:
@@ -984,7 +984,7 @@ class GitOps:
         timeout = _count(timeout, "timeout", 1, 600)
         real = self.files.sb.root(root)
         done = self._git(real, args, timeout, stdin=None if stdin is None else stdin.encode("utf-8"), confined=False)
-        return {"command": shlex.join(["git", *args]), "exit_code": done.returncode,
+        return {"command": mask_remotes(shlex.join(["git", *args])), "exit_code": done.returncode,
                 "stdout": _mask(done.stdout.decode("utf-8", "replace")),
                 "stderr": _mask(done.stderr.decode("utf-8", "replace")),
                 "truncated": done.stdout_cut or done.stderr_cut, "snapshot": None}

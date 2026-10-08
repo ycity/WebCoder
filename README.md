@@ -214,10 +214,10 @@ ChatGPT / Codex 可以直接在项目里用 git：看改动、看历史、提交
 **工具**：
 - 只读（有读权限即可）：`git_status`、`git_diff`（工作区 / 暂存区 / 两个提交之间）、`git_log`、`git_show`（某个提交，或某个文件在某个提交时的内容）、`git_blame`、`git_branches`（分支、远程、标签、stash）。
 - 修改（需要写权限，项目必须是读写的）：`git_add`、`git_commit`（含 amend）、`git_restore`、`git_reset`、`git_branch`（切换 / 新建 / 删除 / 改名）、`git_stash`、`git_sync`（fetch / pull / push，含 force-with-lease）、`git_integrate`（merge / rebase / cherry-pick / revert，以及冲突后的 continue / abort）、`git_tag`、`git_clean`（默认只列出要删的文件）、`git_init`。
-- 任意命令（需要写权限，项目必须是读写的）：`git_run`，参数以列表原样交给 git（不经过 shell），可以附带 stdin（例如 `git apply -`），超时 1–600 秒。钩子、配置、凭据和所有选项都和你自己在电脑上运行时一样，适合其他 git 工具没覆盖或拒绝的操作：submodule、worktree、bisect、改配置、管理远程、带钩子提交等。在项目文件夹里运行，不要求它是仓库的顶层。
+- 任意命令（需要写权限，项目必须是读写的）：`git_run`，参数以列表原样交给 git（不经过 shell），可以附带 stdin（例如 `git apply -`），超时 1–600 秒。写出来超过 19,000 个字符的命令不运行（审计日志要完整保存它），长内容请走 stdin。钩子、配置、凭据和所有选项都和你自己在电脑上运行时一样，适合其他 git 工具没覆盖或拒绝的操作：submodule、worktree、bisect、改配置、管理远程、带钩子提交等。在项目文件夹里运行，不要求它是仓库的顶层。
 
 **安全**：
-- `git_run` 不设限制：git 能借选项运行任意程序（`-c alias.x=!命令`、`rebase --exec`、钩子等），也能读写项目以外的文件，包括 `.env` 和 `.git` 里的配置。所以有写权限，就等于能以你的身份在项目所在的电脑上执行命令。它只做到两点：不弹密码框（需要输密码就直接报错），输出里远程地址带的凭据会被遮住。设为只读的设备不能用它。
+- `git_run` 不设限制：git 能借选项运行任意程序（`-c alias.x=!命令`、`rebase --exec`、钩子等），也能读写项目以外的文件，包括 `.env` 和 `.git` 里的配置。所以有写权限，就等于能以你的身份在项目所在的电脑上执行命令。它只做到两点：不弹密码框（需要输密码就直接报错）；命令里和输出里远程地址带的凭据会被遮住，命令里 URL 的查询串也会遮住，所以回复和审计日志里看不到令牌。设为只读的设备不能用它。
 - 下面几条只针对参数固定的工具（`git_status` 到 `git_init`）。它们只在仓库顶层的项目里运行，位于更大仓库里的子文件夹不行。
 - 这些工具不执行钩子，也不启用 fsmonitor、外部 diff / textconv、分页器和编辑器；需要钩子时用 `git_run`。
 - git 配置里会运行程序的设置（过滤器、合并驱动、签名程序、凭据助手、`core.sshCommand` 等）如果指向 AI 能改的文件，或者有设置来自 AI 能改的文件（例如 include 了仓库里的 `.gitconfig`），这些工具对这个项目停用（`git_run` 照常可用）。「AI 能改的文件」指这台电脑所有允许的文件夹里的文件（`.git` 里的除外），不只是这个项目的。`git-lfs` 这类本机程序不受影响。
